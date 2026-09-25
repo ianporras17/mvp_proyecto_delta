@@ -1,0 +1,125 @@
+x-mpc-party: &mpc-party
+  image: mvp-proyecto-delta-mpc-party:local
+  build:
+    context: ..
+    dockerfile: mvp_proyecto_delta/docker/mp-spdz.Dockerfile
+  depends_on:
+    cert-init:
+      condition: service_completed_successfully
+    coordinator-api:
+      condition: service_healthy
+  environment: &party-environment
+    COORDINATOR_INTERNAL_URL: http://coordinator-api:8000
+    MPC_RUNTIME_ENABLED: "1"
+    MPSPDZ_ROOT: /opt/MP-SPDZ
+    MPC_HOSTS_FILE: /app/mpc/hosts-docker
+    MPC_PROGRAM: delta_video_identity
+    MPC_LOG_DIR: /tmp/mvp-proyecto-delta
+  volumes:
+    - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+  expose:
+    - "5000"
+    - "5001"
+    - "5002"
+  stop_grace_period: 15s
+
+services:
+  coordinator-api:
+    build:
+      context: .
+    command: uvicorn coordinator.main:app --host 0.0.0.0 --port 8000
+    environment:
+      PARTY_URLS: ${PARTY_URLS:-http://localhost:8100,http://localhost:8101,http://localhost:8102}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  cert-init:
+    image: mvp-proyecto-delta-mpc-party:local
+    build:
+      context: ..
+      dockerfile: mvp_proyecto_delta/docker/mp-spdz.Dockerfile
+    command: ["/app/mpc/setup-dev-certs.sh", "/runtime"]
+    volumes:
+      - ./.runtime:/runtime
+    restart: "no"
+
+  party-0:
+    <<: *mpc-party
+    environment:
+      <<: *party-environment
+      PARTY_ID: "0"
+    ports:
+      - "8100:8000"
+      - "14000:14000"
+    volumes:
+      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/logs/party-0:/tmp/mvp-proyecto-delta
+    healthcheck: &party-healthcheck
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  party-1:
+    <<: *mpc-party
+    environment:
+      <<: *party-environment
+      PARTY_ID: "1"
+    ports:
+      - "8101:8000"
+      - "14001:14001"
+    volumes:
+      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/logs/party-1:/tmp/mvp-proyecto-delta
+    healthcheck: *party-healthcheck
+
+  party-2:
+    <<: *mpc-party
+    environment:
+      <<: *party-environment
+      PARTY_ID: "2"
+    ports:
+      - "8102:8000"
+      - "14002:14002"
+    volumes:
+      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/logs/party-2:/tmp/mvp-proyecto-delta
+    healthcheck: *party-healthcheck
+
+  delta-client:
+    profiles: ["client"]
+    image: mvp-proyecto-delta-mpc-party:local
+    depends_on:
+      party-0:
+        condition: service_healthy
+      party-1:
+        condition: service_healthy
+      party-2:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "client"]
+    command: ["--help"]
+    working_dir: /workspace
+    environment:
+      COORDINATOR_URL: http://coordinator-api:8000
+      MPC_PARTY_HOSTS: party-0,party-1,party-2
+      MPC_CLIENT_PORT_BASE: "14000"
+      MPC_CLIENT_ID: "0"
+      MPC_CERT_DIR: /workspace/.runtime/Player-Data
+      MPSPDZ_ROOT: /opt/MP-SPDZ
+      PARTY_CONTROL_URLS: http://party-0:8000,http://party-1:8000,http://party-2:8000
+      DELTA_OUTPUT_DIR: /workspace/output
+    volumes:
+      - .:/workspace

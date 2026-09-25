@@ -1,0 +1,34 @@
+"""Identidad MPC por bloques para el MVP de Proyecto Delta."""
+
+from Compiler.instructions import closeclientconnection
+from Compiler.library import accept_client_connection, do_while, listen_for_clients
+from Compiler.types import MemValue, regint, sint
+
+
+CLIENT_PORT_BASE = 14000
+CHUNK_SIZE = 4096
+
+# Sprint 1 usa el modelo semi-honesto de replicated ring. Esto evita el
+# protocolo activo de triples del ejemplo ExternalIO y conserva input privado.
+program.active = False
+
+listen_for_clients(CLIENT_PORT_BASE)
+
+
+@do_while
+def serve_jobs():
+    client_id = accept_client_connection(CLIENT_PORT_BASE)
+    header = regint.read_from_socket(client_id, 2)
+    number_chunks = header[1]
+    processed_chunks = MemValue(regint(0))
+
+    @do_while
+    def process_chunk():
+        pixels = sint.receive_from_client(CHUNK_SIZE, client_id)
+        # La operación del Sprint 1 es deliberadamente identidad.
+        sint.reveal_to_clients([client_id], pixels)
+        processed_chunks.iadd(1)
+        return processed_chunks < number_chunks
+
+    closeclientconnection(client_id)
+    return True
