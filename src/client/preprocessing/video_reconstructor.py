@@ -70,9 +70,25 @@ class VideoReconstructor:
             width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
             frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-            if (width, height) != (metadata.width, metadata.height) or frames < 1:
+            fps = float(capture.get(cv2.CAP_PROP_FPS))
+            if (
+                (width, height) != (metadata.width, metadata.height)
+                or frames != metadata.frame_count
+                or not np.isfinite(fps)
+                or abs(fps - metadata.fps) > 0.25
+            ):
                 raise VideoReconstructionError(
-                    "El MP4 reconstruido no conserva dimensiones/frames válidos"
+                    "El MP4 reconstruido no conserva dimensiones/frames/FPS válidos"
                 )
+            decoded_count = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                if frame.shape[:2] != (metadata.height, metadata.width):
+                    raise VideoReconstructionError("Un frame reconstruido cambió de tamaño")
+                decoded_count += 1
+            if decoded_count != metadata.frame_count:
+                raise VideoReconstructionError("El MP4 no conserva todos los frames")
         finally:
             capture.release()

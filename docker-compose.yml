@@ -15,6 +15,8 @@ x-mpc-party: &mpc-party
     MPC_HOSTS_FILE: /app/mpc/hosts-docker
     MPC_PROGRAM: delta_video_identity
     MPC_LOG_DIR: /tmp/mvp-proyecto-delta
+    MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+    MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
   volumes:
     - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
   expose:
@@ -30,6 +32,8 @@ services:
     command: uvicorn coordinator.main:app --host 0.0.0.0 --port 8000
     environment:
       PARTY_URLS: ${PARTY_URLS:-http://localhost:8100,http://localhost:8101,http://localhost:8102}
+      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+      MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
     ports:
       - "8000:8000"
     healthcheck:
@@ -121,5 +125,7 @@ services:
       MPSPDZ_ROOT: /opt/MP-SPDZ
       PARTY_CONTROL_URLS: http://party-0:8000,http://party-1:8000,http://party-2:8000
       DELTA_OUTPUT_DIR: /workspace/output
+      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+      MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
     volumes:
       - .:/workspace

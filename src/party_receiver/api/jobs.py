@@ -4,7 +4,9 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from mpc.video_profile import MAX_CONFIGURED_FPS, MAX_VIDEO_FRAMES, MpcVideoProfile
 
 from party_receiver.runtime import MpcRuntimeError
 from party_receiver.services.job_service import (
@@ -19,13 +21,22 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
 class JobMetadata(BaseModel):
-    width: int = Field(ge=1, le=320)
-    height: int = Field(ge=1, le=240)
-    fps: float = Field(gt=0, le=5)
-    frame_count: int = Field(ge=1, le=100)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    fps: float = Field(gt=0, le=MAX_CONFIGURED_FPS)
+    frame_count: int = Field(ge=1, le=MAX_VIDEO_FRAMES)
     dtype: Literal["uint8"]
     channels: Literal[1]
     version: Literal[2]
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> "JobMetadata":
+        profile = MpcVideoProfile.from_environment()
+        if self.width > profile.max_width:
+            raise ValueError(f"width no puede superar {profile.max_width}")
+        if self.height > profile.max_height:
+            raise ValueError(f"height no puede superar {profile.max_height}")
+        return self
 
 
 class PrepareJobRequest(BaseModel):

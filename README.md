@@ -1,7 +1,7 @@
-# Proyecto Delta — MVP MPC Sprint 1
+# Proyecto Delta — MVP MPC de identidad
 
 MVP funcional de infraestructura MPC para video. Un cliente confiable reduce un
-MP4 local a grayscale, como máximo 320x240 y 5 FPS, introduce sus pixels por el
+MP4 local a grayscale, como máximo 640x480 y 10 FPS, introduce sus pixels por el
 `ExternalIO` oficial de MP-SPDZ y recibe el resultado de un programa identidad.
 El cliente reconstruye el resultado en:
 
@@ -11,6 +11,11 @@ output/<video_id>/reconstructed.mp4
 
 El MP4 original y el resultado no anonimizado nunca se envían al Coordinator ni
 a una party individual. Computer Vision se implementará en otro sprint.
+
+La caja máxima conserva la proporción del video y no amplía videos pequeños.
+El límite continúa siendo 20 segundos (hasta 200 cuadros). La mejora es de
+resolución espacial y fluidez: este MVP sigue ejecutando solamente identidad,
+sin modelos, detección, regiones ni anonimización.
 
 ## Arquitectura
 
@@ -117,6 +122,22 @@ El comando equivalente instalado es:
 delta upload /ruta/video.mp4
 ```
 
+El comando anterior usa hasta 10 FPS y una caja máxima de 640x480. Para elegir
+un perfil más económico:
+
+```powershell
+python -m client upload "..\video1.mp4" --mpc-max-width 320 --mpc-max-height 240 --mpc-fps 5
+```
+
+`--mpc-max-width`, `--mpc-max-height` y `--mpc-fps` configuran el cliente. La
+resolución también puede configurarse mediante `MPC_MAX_WIDTH` y `MPC_MAX_HEIGHT`;
+Compose transmite esos valores al Coordinator, las parties y el cliente Docker.
+El cliente no debe superar la resolución configurada en los servicios. Sin alto
+explícito se utiliza 3/4 del ancho como límite, no como proporción forzada.
+El preprocesador ajusta las dimensiones a números pares para evitar que MP4V
+recorte silenciosamente una fila o columna. Los videos de menos de 10 FPS
+conservan su FPS original; no se inventan cuadros.
+
 ### Opción B: cliente confiable en Docker
 
 Si el video se encuentra dentro de la carpeta del repositorio:
@@ -161,7 +182,9 @@ python -m pip install -e .
 python -m pytest -m "not e2e"
 ```
 
-Con Compose saludable, ejecutar el smoke test real (64x48, 2 FPS, 2 s):
+Con Compose saludable, ejecutar los smoke tests reales de identidad:
+muestreo de 20 a 10 FPS en un clip pequeño y un cuadro a 640x480. Se compara
+el payload antes de comprimir el MP4 y se valida también la reconstrucción:
 
 PowerShell:
 
@@ -176,6 +199,15 @@ Linux/macOS:
 RUN_MPC_E2E=1 python -m pytest tests/integration/test_mpc_e2e.py -s
 ```
 
+Validación local del perfil actualizado: **134 tests rápidos y dos E2E reales
+pasaron**. También se procesó `video1.mp4` completo (19,87 s originales):
+199 cuadros, 368x368, 10 FPS y gris, sin ampliar ni recortar el video. Los
+26.949.376 bytes enviados y recibidos por MPC fueron idénticos antes del códec;
+el original quedó intacto y el MP4 se decodificó completo. Tiempo MPC: 936,757 s;
+flujo completo: **944,638 s, unos 15 min 45 s** en esta computadora. No es tiempo
+real ni una prueba de 20 segundos a 640x480. Evidencia local ignorada por Git:
+`.runtime/mvp-profile/video1-summary.json` y `smoke-results.xml`.
+
 ## Apagar y limpiar
 
 ```bash
@@ -186,7 +218,7 @@ Los jobs no crean shares ni archivos de entrada en las parties. `.runtime/`
 conserva certificados de desarrollo reutilizables y logs mínimos de los
 runtimes. Los resultados permanecen bajo `output/` en el cliente.
 
-## Limitaciones del Sprint 1
+## Limitaciones del MVP
 
 - el cálculo es identidad; todavía no hay rostros, placas, blur ni modelos;
 - las tres parties viven en un solo host y una misma organización;
@@ -194,5 +226,7 @@ runtimes. Los resultados permanecen bajo `output/` en el cliente.
   directorio de certificados;
 - no hay base de datos ni recuperación tras reiniciar el Coordinator;
 - se procesa un video a la vez;
-- perfil máximo: 20 s, 320x240, grayscale, 5 FPS;
+- perfil máximo configurado: 20 s, 640x480, grayscale, 10 FPS;
+- aceptar esos límites no demuestra rendimiento de un video completo de
+  20 segundos a 640x480 ni procesamiento en tiempo real;
 - no se ha preparado todavía el despliegue ARM/Raspberry Pi.

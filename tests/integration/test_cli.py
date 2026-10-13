@@ -231,3 +231,62 @@ def test_invalid_input_is_rejected_before_network(tmp_path: Path) -> None:
             StubMpc(),
             StubReconstructor(),
         )
+
+
+@pytest.mark.parametrize("flags,environment,expected", [
+    ([], {}, {"max_width": None, "max_height": None, "target_fps": 10}),
+    (["--mpc-max-width", "480"], {}, {"max_width": 480, "max_height": None, "target_fps": 10}),
+    (["--mpc-max-width", "640", "--mpc-max-height", "480"], {},
+     {"max_width": 640, "max_height": 480, "target_fps": 10}),
+    (["--mpc-max-width", "320", "--mpc-max-height", "240", "--mpc-fps", "5"], {},
+     {"max_width": 320, "max_height": 240, "target_fps": 5}),
+    ([], {"MPC_MAX_WIDTH": "480"}, {"max_width": None, "max_height": None, "target_fps": 10}),
+])
+def test_main_passes_only_resolution_and_fps_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str],
+    environment: dict[str, str], expected: dict,
+) -> None:
+    for name in ("MPC_MAX_WIDTH", "MPC_MAX_HEIGHT"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    options_seen = []
+    original = cli.VideoPreprocessor
+
+    def make_preprocessor(**options):
+        options_seen.append(options)
+        original(**options)  # Keep actual configuration validation.
+        return StubPreprocessor()
+
+    monkeypatch.setattr(cli, "VideoPreprocessor", make_preprocessor)
+    monkeypatch.setattr(cli, "CoordinatorClient", lambda url: StubCoordinator())
+    monkeypatch.setattr(cli, "PartyClient", StubPartyClient)
+    monkeypatch.setattr(cli, "MpcExternalClient", StubMpc)
+    monkeypatch.setattr(cli, "VideoReconstructor", StubReconstructor)
+    monkeypatch.setenv("DELTA_OUTPUT_DIR", str(tmp_path / "output"))
+    assert cli.main(["upload", str(_video(tmp_path)), *flags]) == 0
+    assert options_seen == [expected]
+
+
+@pytest.mark.parametrize("flags", [
+    ["--mpc-fps", "0"], ["--mpc-fps", "11"], ["--mpc-fps", "nan"],
+    ["--mpc-fps", "inf"], ["--mpc-max-width", "0"], ["--mpc-max-width", "641"],
+    ["--mpc-max-height", "0"], ["--mpc-max-height", "481"],
+])
+def test_invalid_profile_does_not_register_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str],
+) -> None:
+    coordinator, parties = StubCoordinator(), StubPartyClient()
+    monkeypatch.setattr(cli, "CoordinatorClient", lambda url: coordinator)
+    monkeypatch.setattr(cli, "PartyClient", lambda: parties)
+    monkeypatch.setattr(cli, "MpcExternalClient", StubMpc)
+    assert cli.main(["upload", str(_video(tmp_path)), *flags]) == 1
+    assert coordinator.calls == parties.calls == []
+
+
+def test_cli_keeps_identity_only_interface() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["upload", "video.mp4"])
+    assert args.mpc_fps == 10
+    assert not hasattr(args, "detect_plates")
+    assert not hasattr(args, "processing_mode")

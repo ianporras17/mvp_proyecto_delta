@@ -20,6 +20,7 @@ from client.preprocessing import (
     VideoReconstructor,
 )
 from mpc import MpcExternalClient, MpcExternalIOError
+from mpc.video_profile import DEFAULT_MPC_FPS, MAX_CONFIGURED_FPS
 
 
 class ClientInputError(ValueError):
@@ -41,6 +42,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preprocesa un MP4, ejecuta MPC y reconstruye el resultado.",
     )
     upload.add_argument("video", type=Path, help="Ruta local al archivo .mp4")
+    upload.add_argument(
+        "--mpc-max-width", type=int, default=None,
+        help="Ancho máximo MPC; predeterminado: MPC_MAX_WIDTH o 640.",
+    )
+    upload.add_argument(
+        "--mpc-max-height", type=int, default=None,
+        help="Alto máximo MPC; predeterminado: MPC_MAX_HEIGHT o 3/4 del ancho.",
+    )
+    upload.add_argument(
+        "--mpc-fps", type=float, default=DEFAULT_MPC_FPS,
+        help=(f"FPS de muestreo MPC; predeterminado {DEFAULT_MPC_FPS:g}, "
+              f"máximo {MAX_CONFIGURED_FPS}. No aumenta los FPS del original."),
+    )
     return parser
 
 
@@ -171,7 +185,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             video_path=args.video,
             coordinator=CoordinatorClient(coordinator_url),
             party_client=PartyClient(),
-            preprocessor=VideoPreprocessor(),
+            preprocessor=VideoPreprocessor(
+                max_width=args.mpc_max_width,
+                max_height=args.mpc_max_height,
+                target_fps=args.mpc_fps,
+            ),
             mpc_client=MpcExternalClient(),
             reconstructor=VideoReconstructor(),
             output_root=output_root,
