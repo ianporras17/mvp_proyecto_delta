@@ -77,7 +77,7 @@ class StubPartyClient:
 
 
 class StubPreprocessor:
-    def process(self, path: Path) -> PreprocessedVideo:
+    def process(self, path: Path, model) -> PreprocessedVideo:
         return PreprocessedVideo(
             b"\x00\x01\x02\x03",
             VideoMetadata(1, 2, 2, 1, 2.0, "uint8", 2),
@@ -124,7 +124,8 @@ def test_success_runs_mpc_reconstructs_and_cleans(tmp_path: Path) -> None:
         StubPreprocessor(),
         StubMpc(),
         StubReconstructor(),
-        tmp_path / "output",
+        model=object(),
+        output_root=tmp_path / "output",
     )
 
     assert result == 0
@@ -157,7 +158,8 @@ def test_mpc_mismatch_marks_failed_and_cleans(tmp_path: Path) -> None:
             StubPreprocessor(),
             StubMpc(corrupt=True),
             StubReconstructor(),
-            tmp_path / "output",
+            model=object(),
+            output_root=tmp_path / "output",
         )
 
     assert "fail" in coordinator.calls
@@ -179,7 +181,8 @@ def test_keyboard_interrupt_marks_failed_and_cleans(tmp_path: Path) -> None:
             StubPreprocessor(),
             InterruptingMpc(),
             StubReconstructor(),
-            tmp_path / "output",
+            model=object(),
+            output_root=tmp_path / "output",
         )
 
     assert "fail" in coordinator.calls
@@ -230,6 +233,7 @@ def test_invalid_input_is_rejected_before_network(tmp_path: Path) -> None:
             StubPreprocessor(),
             StubMpc(),
             StubReconstructor(),
+            model=object(),
         )
 
 
@@ -284,9 +288,16 @@ def test_invalid_profile_does_not_register_job(
     assert coordinator.calls == parties.calls == []
 
 
-def test_cli_keeps_identity_only_interface() -> None:
+def test_cli_keeps_identity_as_explicit_default_and_adds_detector_flags() -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["upload", "video.mp4"])
     assert args.mpc_fps == 10
-    assert not hasattr(args, "detect_plates")
-    assert not hasattr(args, "processing_mode")
+    assert args.processing_mode == "identity"
+    assert not args.detect_plates
+    assert not args.detect_faces
+    args = parser.parse_args([
+        "upload", "video.mp4", "--processing-mode", "anonymize",
+        "--detect-faces", "--detect-plates",
+    ])
+    assert args.processing_mode == "anonymize"
+    assert args.detect_plates and args.detect_faces

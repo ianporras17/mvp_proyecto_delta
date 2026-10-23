@@ -9,10 +9,15 @@ from pathlib import Path
 import sys
 from threading import Lock
 from types import ModuleType
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from client.anonymization import AnonymizationPlan
 
 
 CHUNK_SIZE = 4096
+ANONYMIZATION_ACK = (1145852993, 1)
+HANDSHAKE_TIMEOUT_SECONDS = 10.0
 _IMPORT_LOCK = Lock()
 
 
@@ -60,7 +65,7 @@ class MpcSettings:
 
 
 class MpcExternalClient:
-    """Envía uint8 privados por bloques y recibe identidad solo en cliente."""
+    """Envía uint8 privados por bloques; solo revela el resultado al cliente."""
 
     def __init__(self, settings: MpcSettings | None = None) -> None:
         self._settings = settings or MpcSettings.from_environment()
@@ -101,6 +106,83 @@ class MpcExternalClient:
             raise
         except (OSError, RuntimeError, ValueError, AssertionError) as exc:
             raise MpcExternalIOError(f"Falló ExternalIO de MP-SPDZ: {exc}") from exc
+        finally:
+            if client is not None:
+                for connection in getattr(client, "sockets", []):
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+
+    def process_anonymize(self, payload: bytes, plan: "AnonymizationPlan") -> bytes:
+        """Máscara pública y píxeles originales privados; nunca hay fallback.
+
+        El plan debe prepararse con todos los resultados T024 antes de llamar.
+        El header negativo selecciona el modo del nuevo circuito, sin cambiar
+        el header de identidad anterior. Los tres ACK preceden cualquier píxel.
+        """
+        from client.anonymization import AnonymizationPlan
+
+        if not isinstance(plan, AnonymizationPlan):
+            raise ValueError("La anonimización requiere un AnonymizationPlan validado")
+        if not plan.detections_complete:
+            raise ValueError("Use prepare_anonymization con resultados de todos los fotogramas")
+        if not isinstance(payload, bytes) or len(payload) != plan.payload_size:
+            raise ValueError("Los píxeles no coinciden con las dimensiones del plan")
+        client_module = self._load_official_client()
+        self._validate_certificates()
+        number_chunks = math.ceil(len(payload) / CHUNK_SIZE)
+        client = None
+        try:
+            with _working_directory(self._settings.certificate_dir.parent):
+                client = client_module.Client(
+                    list(self._settings.hostnames),
+                    self._settings.port_base,
+                    self._settings.client_id,
+                )
+            client.send_public_inputs([-len(payload), number_chunks])
+            if len(client.sockets) != 3:
+                raise MpcExternalIOError("Se requieren ACK de las tres parties")
+            # El lector upstream no detecta EOF en mitad de un cuerpo. Proteger
+            # todas las lecturas, incluidas triples y salida, sin cambiar su MPC.
+            client.sockets = [_HandshakeSocket(connection) for connection in client.sockets]
+            for connection in client.sockets:
+                previous_timeout = connection.gettimeout()
+                try:
+                    connection.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
+                    ack = client.receive_plain_values(socket=connection)
+                finally:
+                    connection.settimeout(previous_timeout)
+                if tuple(ack) != ANONYMIZATION_ACK:
+                    raise MpcExternalIOError("La party no confirmó el programa de anonimización")
+
+            result = bytearray()
+            for offset in range(0, len(payload), CHUNK_SIZE):
+                actual_length = min(CHUNK_SIZE, len(payload) - offset)
+                mask = list(plan.mask_chunk(offset, actual_length))
+                mask.extend([0] * (CHUNK_SIZE - actual_length))
+                client.send_public_inputs(mask)
+                # Nunca se ocultan los píxeles en el cliente: enviar los originales.
+                chunk = list(payload[offset : offset + actual_length])
+                chunk.extend([0] * (CHUNK_SIZE - actual_length))
+                client.send_private_inputs(chunk)
+                revealed = client.receive_outputs(CHUNK_SIZE)
+                if len(revealed) != CHUNK_SIZE:
+                    raise MpcExternalIOError("MP-SPDZ devolvió un bloque incompleto")
+                for value in revealed[:actual_length]:
+                    if not isinstance(value, int) or not 0 <= value <= 255:
+                        raise MpcExternalIOError("MP-SPDZ devolvió un píxel fuera de uint8")
+                    result.append(value)
+                if any(revealed[actual_length:]):
+                    raise MpcExternalIOError("MP-SPDZ devolvió padding no nulo")
+            result = bytes(result)
+            # Validar, no producir un resultado anonimizado localmente.
+            plan.validate_result(payload, result)
+            return result
+        except MpcExternalIOError:
+            raise
+        except Exception as exc:
+            raise MpcExternalIOError(f"Falló anonimización ExternalIO de MP-SPDZ: {exc}") from exc
         finally:
             if client is not None:
                 for connection in getattr(client, "sockets", []):
@@ -157,6 +239,25 @@ class MpcExternalClient:
                 "Faltan certificados de desarrollo; ejecute docker compose up --build: "
                 + ", ".join(missing)
             )
+
+
+class _HandshakeSocket:
+    """Lecturas completas y EOF explícito durante todo el transporte anónimo."""
+
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def recv(self, count: int) -> bytes:
+        data = bytearray()
+        while len(data) < count:
+            part = self.connection.recv(count - len(data))
+            if not part:
+                raise OSError("Conexión cerrada durante ExternalIO de anonimización")
+            data.extend(part)
+        return bytes(data)
 
 
 @contextmanager

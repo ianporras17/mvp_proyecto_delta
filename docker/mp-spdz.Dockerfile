@@ -34,7 +34,10 @@ COPY mvp_proyecto_delta/mpc/Programs/Source/delta_video_identity.mpc \
 
 ARG BUILD_JOBS=2
 RUN make -j"${BUILD_JOBS}" replicated-ring-party.x
+COPY mvp_proyecto_delta/mpc/Programs/Source/delta_video_anonymize.mpc \
+    Programs/Source/delta_video_anonymize.mpc
 RUN python3 ./compile.py -M -R 64 delta_video_identity
+RUN python3 ./compile.py -M -R 64 delta_video_anonymize
 
 WORKDIR /app
 COPY mvp_proyecto_delta/requirements.txt ./

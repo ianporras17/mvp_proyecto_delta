@@ -1,0 +1,95 @@
+"""Identidad compatible y ocultamiento negro de máscaras públicas por bloques.
+
+El header conserva dos enteros: [longitud, bloques]. Una longitud positiva
+selecciona identidad (protocolo anterior); una negativa selecciona anonimización.
+En ese segundo modo se confirma la versión ANTES de recibir píxeles secretos.
+Las máscaras son públicas: 0 conserva el píxel; 1 lo sustituye por negro.
+"""
+
+from Compiler.instructions import closeclientconnection
+from Compiler.library import (
+    accept_client_connection,
+    do_while,
+    else_,
+    for_range,
+    if_,
+    if_e,
+    listen_for_clients,
+    runtime_error_if,
+)
+from Compiler.types import Array, MemValue, cint, regint, sint
+
+
+CLIENT_PORT_BASE = 14000
+CHUNK_SIZE = 4096
+MAX_PAYLOAD_SIZE = 200 * 640 * 480
+ANONYMIZATION_MAGIC = 0x444C5441  # DLTA; público, no un resultado secreto.
+ANONYMIZATION_VERSION = 1
+
+# Se conserva replicated-ring semi-honesto y el input privado de ExternalIO.
+program.active = False
+
+listen_for_clients(CLIENT_PORT_BASE)
+
+
+@do_while
+def serve_jobs():
+    client_id = accept_client_connection(CLIENT_PORT_BASE)
+    header = regint.read_from_socket(client_id, 2)
+    anonymize = header[0] < 0
+    payload_size = anonymize.if_else(-header[0], header[0])
+    number_chunks = header[1]
+    runtime_error_if(
+        (payload_size <= 0) + (payload_size > MAX_PAYLOAD_SIZE),
+        'Longitud de video fuera del perfil MPC',
+    )
+    runtime_error_if(
+        number_chunks != (payload_size + CHUNK_SIZE - 1) // CHUNK_SIZE,
+        'Cantidad de bloques incompatible con longitud',
+    )
+
+    @if_(anonymize)
+    def acknowledge_anonymization():
+        # Un runtime de identidad anterior no emite este ACK. El cliente debe
+        # comprobarlo en las tres parties, con timeout, antes del input privado.
+        regint.write_to_socket(
+            client_id,
+            [regint(ANONYMIZATION_MAGIC), regint(ANONYMIZATION_VERSION)],
+        )
+
+    processed_chunks = MemValue(regint(0))
+    public_mask = Array(CHUNK_SIZE, regint)
+
+    @do_while
+    def process_chunk():
+        @if_e(anonymize)
+        def anonymize_chunk():
+            mask = regint.read_from_socket(client_id, size=CHUNK_SIZE)
+            public_mask.assign_vector(mask)
+
+            # Bucle público en tiempo de ejecución: no expande 4096 circuitos
+            # ni utiliza comparaciones secretas para decidir las coordenadas.
+            @for_range(CHUNK_SIZE)
+            def validate_mask(index):
+                value = public_mask[index]
+                runtime_error_if(
+                    (value != 0) * (value != 1),
+                    'La mascara publica debe contener solamente 0 y 1',
+                )
+
+            pixels = sint.receive_from_client(1, client_id, size=CHUNK_SIZE)[0]
+            processed = pixels * (1 - cint(mask))
+            # No se revela la entrada original en este camino. Solo se entrega
+            # al cliente conectado el bloque ya procesado, mediante ExternalIO.
+            sint.reveal_to_clients([client_id], [processed])
+
+        @else_
+        def identity_chunk():
+            pixels = sint.receive_from_client(1, client_id, size=CHUNK_SIZE)[0]
+            sint.reveal_to_clients([client_id], [pixels])
+
+        processed_chunks.iadd(1)
+        return processed_chunks < number_chunks
+
+    closeclientconnection(client_id)
+    return True

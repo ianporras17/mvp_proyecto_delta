@@ -11,6 +11,7 @@ import pytest
 
 from client import cli
 from client.preprocessing import VideoPreprocessor
+from client.preprocessing.yunet import DEFAULT_YUNET_MODEL, YuNet
 from mpc import MpcExternalClient
 
 
@@ -57,7 +58,7 @@ def test_three_real_parties_reconstruct_tiny_video(
         )
     writer.release()
     source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
-    processed = VideoPreprocessor().process(source)
+    processed = VideoPreprocessor().process(source, YuNet(DEFAULT_YUNET_MODEL))
     assert processed.metadata.frame_count == expected_count
     assert processed.metadata.fps == expected_fps
     assert (processed.metadata.width, processed.metadata.height) == source_size
