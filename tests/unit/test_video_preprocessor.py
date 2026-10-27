@@ -15,6 +15,14 @@ from client.preprocessing import (
 from client.preprocessing.video_preprocessor import VideoMetadata
 
 
+class FakeYuNet:
+    def setInputSize(self, size):
+        pass
+
+    def infer(self, image):
+        return np.empty((0, 15), dtype=np.float32)
+
+
 @pytest.fixture(autouse=True)
 def _clear_profile_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MPC_MAX_WIDTH", raising=False)
@@ -48,7 +56,7 @@ def test_converts_to_raw_grayscale_and_reduces_fps(tmp_path: Path) -> None:
         tmp_path / "tiny.mp4", width=64, height=48, fps=20, frames=20
     )
 
-    result = VideoPreprocessor().process(source)
+    result = VideoPreprocessor().process(source, FakeYuNet())
 
     assert result.metadata.frame_count == 10
     assert result.metadata.width == 64
@@ -72,8 +80,8 @@ def test_downscales_but_does_not_upscale(tmp_path: Path) -> None:
         tmp_path / "small.mp4", width=64, height=48, fps=2, frames=2
     )
 
-    large_result = VideoPreprocessor().process(large)
-    small_result = VideoPreprocessor().process(small)
+    large_result = VideoPreprocessor().process(large, FakeYuNet())
+    small_result = VideoPreprocessor().process(small, FakeYuNet())
 
     assert (large_result.metadata.width, large_result.metadata.height) == (640, 480)
     assert (small_result.metadata.width, small_result.metadata.height) == (64, 48)
@@ -85,7 +93,7 @@ def test_rejects_video_longer_than_twenty_seconds(tmp_path: Path) -> None:
     )
 
     with pytest.raises(VideoPreprocessingError, match="duración máxima"):
-        VideoPreprocessor().process(source)
+        VideoPreprocessor().process(source, FakeYuNet())
 
 
 @pytest.mark.parametrize("content", [b"", b"not-an-mp4"])
@@ -93,14 +101,14 @@ def test_rejects_invalid_mp4(tmp_path: Path, content: bytes) -> None:
     source = tmp_path / "invalid.mp4"
     source.write_bytes(content)
     with pytest.raises(VideoPreprocessingError):
-        VideoPreprocessor().process(source)
+        VideoPreprocessor().process(source, FakeYuNet())
 
 
 def test_reconstructs_a_playable_mp4(tmp_path: Path) -> None:
     source = _make_video(
         tmp_path / "source.mp4", width=64, height=48, fps=10, frames=10
     )
-    processed = VideoPreprocessor().process(source)
+    processed = VideoPreprocessor().process(source, FakeYuNet())
 
     destination = VideoReconstructor().reconstruct(
         processed.payload,
@@ -126,7 +134,7 @@ def test_previous_resolution_and_fps_remain_configurable(tmp_path: Path) -> None
 
     result = VideoPreprocessor(
         max_width=320, max_height=240, target_fps=5
-    ).process(source)
+    ).process(source, FakeYuNet())
 
     assert (result.metadata.width, result.metadata.height) == (320, 240)
     assert result.metadata.fps == pytest.approx(5)
@@ -249,7 +257,7 @@ def test_sampling_preserves_exact_pixel_values_and_temporal_order(
     )
     monkeypatch.setattr(cv2, "VideoCapture", lambda _: capture)
 
-    result = VideoPreprocessor().process("lossless-test.mp4")
+    result = VideoPreprocessor().process("lossless-test.mp4", FakeYuNet())
     frames = np.frombuffer(result.payload, dtype=np.uint8).reshape(-1, 12, 16)
 
     assert result.metadata.frame_count == len(expected_values)
@@ -267,7 +275,7 @@ def test_accepts_exactly_twenty_seconds_and_two_hundred_frames(
     )
     monkeypatch.setattr(cv2, "VideoCapture", lambda _: capture)
 
-    result = VideoPreprocessor().process("twenty-seconds.mp4")
+    result = VideoPreprocessor().process("twenty-seconds.mp4", FakeYuNet())
 
     assert result.metadata.frame_count == 200
     assert result.metadata.fps == 10
@@ -282,7 +290,7 @@ def test_rejects_invalid_source_fps(
     monkeypatch.setattr(cv2, "VideoCapture", lambda _: capture)
 
     with pytest.raises(VideoPreprocessingError, match="FPS válido"):
-        VideoPreprocessor().process("invalid-fps.mp4")
+        VideoPreprocessor().process("invalid-fps.mp4", FakeYuNet())
     assert capture.released
 
 

@@ -42,7 +42,7 @@ class MpcRuntimeManager:
         self.hosts_file = Path(
             hosts_file or os.getenv("MPC_HOSTS_FILE", "/app/mpc/hosts-docker")
         )
-        self.program = program or os.getenv("MPC_PROGRAM", "delta_video_identity")
+        self.program = program or os.getenv("MPC_PROGRAM", "delta_video_anonymize")
         self.startup_grace = startup_grace
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: BinaryIO | None = None

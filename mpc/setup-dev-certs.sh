@@ -12,6 +12,13 @@ for file in P0.pem P0.key P1.pem P1.key P2.pem P2.key C0.pem C0.key; do
     fi
 done
 
+for file in P0.pem P1.pem P2.pem C0.pem; do
+    # Reutilizar solo certificados legibles con al menos un día de vigencia.
+    if ! openssl x509 -in "${cert_dir}/${file}" -checkend 86400 -noout >/dev/null 2>&1; then
+        complete=0
+    fi
+done
+
 if [[ "${complete}" -eq 0 ]]; then
     # setup-ssl.sh elimina *.0 sin -f; el placeholder hace seguro el primer uso.
     touch "${cert_dir}/bootstrap.0"

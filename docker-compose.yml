@@ -13,7 +13,7 @@ x-mpc-party: &mpc-party
     MPC_RUNTIME_ENABLED: "1"
     MPSPDZ_ROOT: /opt/MP-SPDZ
     MPC_HOSTS_FILE: /app/mpc/hosts-docker
-    MPC_PROGRAM: delta_video_identity
+    MPC_PROGRAM: ${MPC_PROGRAM:-delta_video_anonymize}
     MPC_LOG_DIR: /tmp/mvp-proyecto-delta
     MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
     MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
