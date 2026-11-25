@@ -1,8 +1,11 @@
+x-host-user: &host-user "${HOST_UID:-${SUDO_UID:-1000}}:${HOST_GID:-${SUDO_GID:-1000}}"
+
 x-mpc-party: &mpc-party
-  image: mvp-proyecto-delta-mpc-party:local
+  image: ${MPC_IMAGE:-mvp-proyecto-delta-mpc-party:local}
   build:
     context: ..
     dockerfile: mvp_proyecto_delta/docker/mp-spdz.Dockerfile
+  user: *host-user
   depends_on:
     cert-init:
       condition: service_completed_successfully
@@ -14,11 +17,10 @@ x-mpc-party: &mpc-party
     MPSPDZ_ROOT: /opt/MP-SPDZ
     MPC_HOSTS_FILE: /app/mpc/hosts-docker
     MPC_PROGRAM: ${MPC_PROGRAM:-delta_video_anonymize}
-    MPC_LOG_DIR: /tmp/mvp-proyecto-delta
-    MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+    MPC_LOG_DIR: /tmp/proyecto-delta
+    MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-1920}
     MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
-  volumes:
-    - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+    DELTA_WEB_ORIGINS: ${DELTA_WEB_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081}
   expose:
     - "5000"
     - "5001"
@@ -26,13 +28,32 @@ x-mpc-party: &mpc-party
   stop_grace_period: 15s
 
 services:
+  pocketbase:
+    build:
+      context: .
+      dockerfile: docker/pocketbase.Dockerfile
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - pocketbase-data:/pb/pb_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8090/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   coordinator-api:
+    user: *host-user
     build:
       context: .
     command: uvicorn coordinator.main:app --host 0.0.0.0 --port 8000
     environment:
       PARTY_URLS: ${PARTY_URLS:-http://localhost:8100,http://localhost:8101,http://localhost:8102}
-      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+      PARTY_CONTROL_URLS: http://party-0:8000,http://party-1:8000,http://party-2:8000
+      DELTA_WEB_ORIGINS: ${DELTA_WEB_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081}
+      DELTA_LEASE_SECONDS: ${DELTA_LEASE_SECONDS:-90}
+      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-1920}
       MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
     ports:
       - "8000:8000"
@@ -47,13 +68,14 @@ services:
       retries: 30
 
   cert-init:
-    image: mvp-proyecto-delta-mpc-party:local
+    user: *host-user
+    image: ${MPC_IMAGE:-mvp-proyecto-delta-mpc-party:local}
     build:
       context: ..
       dockerfile: mvp_proyecto_delta/docker/mp-spdz.Dockerfile
     command: ["/app/mpc/setup-dev-certs.sh", "/runtime"]
     volumes:
-      - ./.runtime:/runtime
+      - ./.runtime/mvp:/runtime
     restart: "no"
 
   party-0:
@@ -65,8 +87,8 @@ services:
       - "8100:8000"
       - "14000:14000"
     volumes:
-      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
-      - ./.runtime/logs/party-0:/tmp/mvp-proyecto-delta
+      - ./.runtime/mvp/party-0/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/mvp/logs/party-0:/tmp/proyecto-delta
     healthcheck: &party-healthcheck
       test:
         - CMD
@@ -86,8 +108,8 @@ services:
       - "8101:8000"
       - "14001:14001"
     volumes:
-      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
-      - ./.runtime/logs/party-1:/tmp/mvp-proyecto-delta
+      - ./.runtime/mvp/party-1/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/mvp/logs/party-1:/tmp/proyecto-delta
     healthcheck: *party-healthcheck
 
   party-2:
@@ -99,13 +121,49 @@ services:
       - "8102:8000"
       - "14002:14002"
     volumes:
-      - ./.runtime/Player-Data:/opt/MP-SPDZ/Player-Data:ro
-      - ./.runtime/logs/party-2:/tmp/mvp-proyecto-delta
+      - ./.runtime/mvp/party-2/Player-Data:/opt/MP-SPDZ/Player-Data:ro
+      - ./.runtime/mvp/logs/party-2:/tmp/proyecto-delta
     healthcheck: *party-healthcheck
 
+  result-storage:
+    build: .
+    command: uvicorn result_storage.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DELTA_STORAGE_DIR: /data/results
+      DELTA_WEB_ORIGINS: ${DELTA_WEB_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081}
+    ports:
+      - "8200:8000"
+    volumes:
+      - delta-results:/data/results
+
+  processing-web:
+    image: mvp-proyecto-delta-web:local
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment: &web-environment
+      DELTA_POCKETBASE_URL: ${DELTA_POCKETBASE_URL:-http://127.0.0.1:8090}
+      DELTA_COORDINATOR_URL: ${DELTA_COORDINATOR_URL:-http://localhost:8000}
+      DELTA_PARTY_URLS: ${DELTA_PARTY_URLS:-http://localhost:8100,http://localhost:8101,http://localhost:8102}
+      DELTA_STORAGE_URL: ${DELTA_STORAGE_URL:-http://localhost:8200}
+    ports:
+      - "8080:80"
+
+  catalog-web:
+    image: mvp-proyecto-delta-web:local
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment:
+      <<: *web-environment
+      DELTA_WEB_MODE: catalog
+    ports:
+      - "8081:80"
+
   delta-client:
+    user: *host-user
     profiles: ["client"]
-    image: mvp-proyecto-delta-mpc-party:local
+    image: ${MPC_IMAGE:-mvp-proyecto-delta-mpc-party:local}
     depends_on:
       party-0:
         condition: service_healthy
@@ -121,11 +179,15 @@ services:
       MPC_PARTY_HOSTS: party-0,party-1,party-2
       MPC_CLIENT_PORT_BASE: "14000"
       MPC_CLIENT_ID: "0"
-      MPC_CERT_DIR: /workspace/.runtime/Player-Data
+      MPC_CERT_DIR: /workspace/.runtime/mvp/Player-Data
       MPSPDZ_ROOT: /opt/MP-SPDZ
       PARTY_CONTROL_URLS: http://party-0:8000,http://party-1:8000,http://party-2:8000
       DELTA_OUTPUT_DIR: /workspace/output
-      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-640}
+      MPC_MAX_WIDTH: ${MPC_MAX_WIDTH:-1920}
       MPC_MAX_HEIGHT: ${MPC_MAX_HEIGHT:-}
     volumes:
       - .:/workspace
+
+volumes:
+  delta-results:
+  pocketbase-data:

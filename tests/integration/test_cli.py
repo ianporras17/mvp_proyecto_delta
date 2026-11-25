@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
 import pytest
 
 from client import cli
@@ -15,6 +16,7 @@ from client.preprocessing import PreprocessedVideo, VideoMetadata
 class StubCoordinator:
     video_id: str = field(default_factory=lambda: str(uuid4()))
     calls: list[str] = field(default_factory=list)
+    prepared_metadata: list[dict] = field(default_factory=list)
 
     def register_video(self, filename: str, video_format: str) -> VideoRegistration:
         self.calls.append(f"register:{filename}:{video_format}")
@@ -30,6 +32,7 @@ class StubCoordinator:
 
     def prepare(self, video_id: str, metadata: dict) -> VideoState:
         self.calls.append("prepare")
+        self.prepared_metadata.append(metadata.copy())
         return self._state("PREPARING")
 
     def wait_for_status(self, video_id: str, expected: str) -> VideoState:
@@ -59,9 +62,11 @@ class StubCoordinator:
 @dataclass
 class StubPartyClient:
     calls: list[str] = field(default_factory=list)
+    prepared_metadata: list[dict] = field(default_factory=list)
 
     def prepare_job(self, party_id: int, url: str, video_id: str, metadata: dict) -> None:
         self.calls.append(f"prepare:{party_id}")
+        self.prepared_metadata.append(metadata.copy())
 
     def start_job(self, party_id: int, url: str, video_id: str) -> None:
         self.calls.append(f"start:{party_id}")
@@ -76,8 +81,20 @@ class StubPartyClient:
         self.calls.append(f"fail:{party_id}")
 
 
+class FakeYuNet:
+    def setInputSize(self, size: list[int]) -> None:
+        pass
+
+    def infer(self, image: np.ndarray) -> np.ndarray:
+        return np.empty((0, 15), dtype=np.float32)
+
+
 class StubPreprocessor:
-    def process(self, path: Path, model) -> PreprocessedVideo:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, FakeYuNet]] = []
+
+    def process(self, path: Path, model: FakeYuNet) -> PreprocessedVideo:
+        self.calls.append((path, model))
         return PreprocessedVideo(
             b"\x00\x01\x02\x03",
             VideoMetadata(1, 2, 2, 1, 2.0, "uint8", 2),
@@ -87,8 +104,10 @@ class StubPreprocessor:
 class StubMpc:
     def __init__(self, corrupt: bool = False) -> None:
         self.corrupt = corrupt
+        self.payloads: list[bytes] = []
 
     def process_identity(self, payload: bytes) -> bytes:
+        self.payloads.append(payload)
         return b"bad!" if self.corrupt else payload
 
 
@@ -98,9 +117,13 @@ class InterruptingMpc:
 
 
 class StubReconstructor:
+    def __init__(self) -> None:
+        self.payloads: list[bytes] = []
+
     def reconstruct(
         self, payload: bytes, metadata: VideoMetadata, video_id: str, output_root: Path
     ) -> Path:
+        self.payloads.append(payload)
         destination = Path(output_root) / video_id / "reconstructed.mp4"
         destination.parent.mkdir(parents=True)
         destination.write_bytes(b"mp4")
@@ -116,15 +139,20 @@ def _video(tmp_path: Path) -> Path:
 def test_success_runs_mpc_reconstructs_and_cleans(tmp_path: Path) -> None:
     coordinator = StubCoordinator()
     parties = StubPartyClient()
+    preprocessor = StubPreprocessor()
+    mpc = StubMpc()
+    reconstructor = StubReconstructor()
+    model = FakeYuNet()
+    source = _video(tmp_path)
 
     result = cli.upload_video(
-        _video(tmp_path),
+        source,
         coordinator,
         parties,
-        StubPreprocessor(),
-        StubMpc(),
-        StubReconstructor(),
-        model=object(),
+        preprocessor,
+        mpc,
+        reconstructor,
+        model=model,
         output_root=tmp_path / "output",
     )
 
@@ -144,6 +172,12 @@ def test_success_runs_mpc_reconstructs_and_cleans(tmp_path: Path) -> None:
         "complete:0", "complete:1", "complete:2",
         "cleanup:0", "cleanup:1", "cleanup:2",
     ]
+    assert preprocessor.calls == [(source, model)]
+    assert mpc.payloads == [b"\x00\x01\x02\x03"]
+    assert reconstructor.payloads == mpc.payloads
+    public_metadata = VideoMetadata(1, 2, 2, 1, 2.0, "uint8", 2).as_dict()
+    assert coordinator.prepared_metadata == [public_metadata]
+    assert parties.prepared_metadata == [public_metadata] * 3
 
 
 def test_mpc_mismatch_marks_failed_and_cleans(tmp_path: Path) -> None:
@@ -158,7 +192,7 @@ def test_mpc_mismatch_marks_failed_and_cleans(tmp_path: Path) -> None:
             StubPreprocessor(),
             StubMpc(corrupt=True),
             StubReconstructor(),
-            model=object(),
+            model=FakeYuNet(),
             output_root=tmp_path / "output",
         )
 
@@ -181,7 +215,7 @@ def test_keyboard_interrupt_marks_failed_and_cleans(tmp_path: Path) -> None:
             StubPreprocessor(),
             InterruptingMpc(),
             StubReconstructor(),
-            model=object(),
+            model=FakeYuNet(),
             output_root=tmp_path / "output",
         )
 
@@ -233,71 +267,257 @@ def test_invalid_input_is_rejected_before_network(tmp_path: Path) -> None:
             StubPreprocessor(),
             StubMpc(),
             StubReconstructor(),
-            model=object(),
+            model=FakeYuNet(),
         )
 
 
-@pytest.mark.parametrize("flags,environment,expected", [
-    ([], {}, {"max_width": None, "max_height": None, "target_fps": 10}),
-    (["--mpc-max-width", "480"], {}, {"max_width": 480, "max_height": None, "target_fps": 10}),
-    (["--mpc-max-width", "640", "--mpc-max-height", "480"], {},
-     {"max_width": 640, "max_height": 480, "target_fps": 10}),
-    (["--mpc-max-width", "320", "--mpc-max-height", "240", "--mpc-fps", "5"], {},
-     {"max_width": 320, "max_height": 240, "target_fps": 5}),
-    ([], {"MPC_MAX_WIDTH": "480"}, {"max_width": None, "max_height": None, "target_fps": 10}),
-])
-def test_main_passes_only_resolution_and_fps_profile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str],
-    environment: dict[str, str], expected: dict,
+@pytest.mark.parametrize(
+    ("flags", "environment", "expected_options", "expected_size"),
+    [
+        ([], {}, {"max_width": None, "max_height": None, "target_fps": 30}, (640, 480)),
+        (["--mpc-max-width", "480"], {},
+         {"max_width": 480, "max_height": None, "target_fps": 30}, (480, 360)),
+        (["--mpc-max-width", "640", "--mpc-max-height", "480"], {},
+         {"max_width": 640, "max_height": 480, "target_fps": 30}, (640, 480)),
+        ([], {"MPC_MAX_WIDTH": "480"},
+         {"max_width": None, "max_height": None, "target_fps": 30}, (480, 360)),
+        ([], {"MPC_MAX_WIDTH": "640", "MPC_MAX_HEIGHT": "360"},
+         {"max_width": None, "max_height": None, "target_fps": 30}, (480, 360)),
+        (["--mpc-fps", "5"], {},
+         {"max_width": None, "max_height": None, "target_fps": 5}, (640, 480)),
+    ],
+)
+def test_main_forwards_resolution_and_fps_options_to_preprocessing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    environment: dict[str, str],
+    expected_options: dict[str, int | float | None],
+    expected_size: tuple[int, int],
 ) -> None:
-    for name in ("MPC_MAX_WIDTH", "MPC_MAX_HEIGHT"):
-        monkeypatch.delenv(name, raising=False)
-    for name, value in environment.items():
-        monkeypatch.setenv(name, value)
-    options_seen = []
-    original = cli.VideoPreprocessor
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MPC_MAX_WIDTH", raising=False)
+    monkeypatch.delenv("MPC_MAX_HEIGHT", raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    coordinator = StubCoordinator()
+    parties = StubPartyClient()
+    model = FakeYuNet()
+    preprocessor = StubPreprocessor()
+    actual_options = []
+    actual_sizes = []
+    original_preprocessor = cli.VideoPreprocessor
 
-    def make_preprocessor(**options):
-        options_seen.append(options)
-        original(**options)  # Keep actual configuration validation.
-        return StubPreprocessor()
+    def make_preprocessor(**options) -> StubPreprocessor:
+        actual_options.append(options)
+        configured = original_preprocessor(**options)
+        actual_sizes.append(configured._scaled_size(640, 480))
+        return preprocessor
 
     monkeypatch.setattr(cli, "VideoPreprocessor", make_preprocessor)
-    monkeypatch.setattr(cli, "CoordinatorClient", lambda url: StubCoordinator())
-    monkeypatch.setattr(cli, "PartyClient", StubPartyClient)
-    monkeypatch.setattr(cli, "MpcExternalClient", StubMpc)
-    monkeypatch.setattr(cli, "VideoReconstructor", StubReconstructor)
-    monkeypatch.setenv("DELTA_OUTPUT_DIR", str(tmp_path / "output"))
-    assert cli.main(["upload", str(_video(tmp_path)), *flags]) == 0
-    assert options_seen == [expected]
-
-
-@pytest.mark.parametrize("flags", [
-    ["--mpc-fps", "0"], ["--mpc-fps", "11"], ["--mpc-fps", "nan"],
-    ["--mpc-fps", "inf"], ["--mpc-max-width", "0"], ["--mpc-max-width", "641"],
-    ["--mpc-max-height", "0"], ["--mpc-max-height", "481"],
-])
-def test_invalid_profile_does_not_register_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str],
-) -> None:
-    coordinator, parties = StubCoordinator(), StubPartyClient()
     monkeypatch.setattr(cli, "CoordinatorClient", lambda url: coordinator)
     monkeypatch.setattr(cli, "PartyClient", lambda: parties)
     monkeypatch.setattr(cli, "MpcExternalClient", StubMpc)
+    monkeypatch.setattr(cli, "VideoReconstructor", StubReconstructor)
+    monkeypatch.setattr(cli, "YuNet", lambda **options: model)
+    monkeypatch.setenv("DELTA_OUTPUT_DIR", str(tmp_path / "output"))
+    source = _video(tmp_path)
+
+    assert cli.main(["upload", str(source), *flags]) == 0
+    assert actual_options == [expected_options]
+    assert actual_sizes == [expected_size]
+    assert preprocessor.calls == [(source, model)]
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [["--mpc-max-width", "0"], ["--mpc-max-height", "0"],
+     ["--mpc-max-width", "641"], ["--mpc-max-height", "481"],
+     ["--mpc-fps", "0"], ["--mpc-fps", "11"],
+     ["--mpc-fps", "nan"], ["--mpc-fps", "inf"]],
+)
+def test_invalid_profile_is_rejected_before_network_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    monkeypatch.delenv("MPC_MAX_WIDTH", raising=False)
+    monkeypatch.delenv("MPC_MAX_HEIGHT", raising=False)
+    coordinator = StubCoordinator()
+    parties = StubPartyClient()
+    monkeypatch.setattr(cli, "CoordinatorClient", lambda url: coordinator)
+    monkeypatch.setattr(cli, "PartyClient", lambda: parties)
+    monkeypatch.setattr(cli, "MpcExternalClient", StubMpc)
+    monkeypatch.setattr(cli, "YuNet", lambda **options: FakeYuNet())
+
     assert cli.main(["upload", str(_video(tmp_path)), *flags]) == 1
-    assert coordinator.calls == parties.calls == []
+    assert coordinator.calls == []
+    assert parties.calls == []
 
 
-def test_cli_keeps_identity_as_explicit_default_and_adds_detector_flags() -> None:
-    parser = cli.build_parser()
-    args = parser.parse_args(["upload", "video.mp4"])
-    assert args.mpc_fps == 10
-    assert args.processing_mode == "identity"
-    assert not args.detect_plates
-    assert not args.detect_faces
-    args = parser.parse_args([
-        "upload", "video.mp4", "--processing-mode", "anonymize",
-        "--detect-faces", "--detect-plates",
-    ])
-    assert args.processing_mode == "anonymize"
-    assert args.detect_plates and args.detect_faces
+@pytest.mark.parametrize("option", ["--mpc-max-width", "--mpc-fps"])
+def test_profile_flags_reject_non_numeric_input(option: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.build_parser().parse_args(["upload", "input.mp4", option, "large"])
+    assert error.value.code == 2
+
+
+class StubAnonymizingMpc(StubMpc):
+    def __init__(self, result: bytes = b"\x00\x00\x02\x03") -> None:
+        super().__init__()
+        self.result = result
+        self.plans = []
+
+    def process_identity(self, payload: bytes) -> bytes:
+        raise AssertionError("Anonimización nunca debe hacer fallback a identidad")
+
+    def process_anonymize(self, payload: bytes, plan) -> bytes:
+        self.payloads.append(payload)
+        self.plans.append(plan)
+        return self.result
+
+
+def _anonymization_plan():
+    from client.anonymization import prepare_anonymization
+    from client.regions import DetectedRegion, FrameDetections, RegionType
+    return prepare_anonymization(
+        (FrameDetections.success(0, (DetectedRegion(RegionType.FACE, 1, 0, 1, 1),)),),
+        source_size=(2, 2), target_size=(2, 2), frame_count=1,
+    )
+
+
+def test_anonymize_mode_sends_original_pixels_and_reconstructs_only_validated_result(tmp_path: Path) -> None:
+    coordinator, parties = StubCoordinator(), StubPartyClient()
+    mpc, reconstructor = StubAnonymizingMpc(), StubReconstructor()
+    plan = _anonymization_plan()
+
+    assert cli.upload_video(
+        _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+        reconstructor, model=FakeYuNet(), output_root=tmp_path / "output",
+        processing_mode="anonymize", anonymization_plan=plan,
+    ) == 0
+    assert mpc.payloads == [b"\x00\x01\x02\x03"]
+    assert mpc.plans == [plan]
+    assert reconstructor.payloads == [b"\x00\x00\x02\x03"]
+    assert coordinator.calls[-2:] == ["complete", "cleanup"]
+
+
+@pytest.mark.parametrize("invalid_result", [b"\x00\x01\x02\x03", b"\x00\x00\x09\x03", b"short"])
+def test_bad_anonymization_result_fails_cleans_and_never_reconstructs(tmp_path: Path, invalid_result: bytes) -> None:
+    coordinator, parties = StubCoordinator(), StubPartyClient()
+    mpc, reconstructor = StubAnonymizingMpc(invalid_result), StubReconstructor()
+    with pytest.raises(ValueError):
+        cli.upload_video(
+            _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+            reconstructor, model=FakeYuNet(), output_root=tmp_path / "output",
+            processing_mode="anonymize", anonymization_plan=_anonymization_plan(),
+        )
+    assert reconstructor.payloads == []
+    assert "fail" in coordinator.calls and "cleanup" in coordinator.calls
+    assert "complete" not in coordinator.calls
+
+
+@pytest.mark.parametrize("options", [
+    {"processing_mode": "anonymize"},
+    {"processing_mode": "unknown"},
+    {"processing_mode": "identity", "anonymization_plan": "not allowed"},
+    {"processing_mode": "anonymize", "anonymization_plan": "invalid plan"},
+    {"processing_mode": "anonymize", "anonymization_plan": "invalid", "regions_json": Path("both.json")},
+])
+def test_unsafe_mode_or_missing_plan_is_rejected_before_any_job(tmp_path: Path, options: dict) -> None:
+    coordinator, parties, mpc = StubCoordinator(), StubPartyClient(), StubAnonymizingMpc()
+    with pytest.raises(cli.ClientInputError):
+        cli.upload_video(
+            _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+            StubReconstructor(), model=FakeYuNet(), **options,
+        )
+    assert coordinator.calls == parties.calls == mpc.payloads == []
+
+
+def test_plan_must_match_actual_metadata_not_just_total_pixel_count(tmp_path: Path) -> None:
+    from client.anonymization import prepare_anonymization
+    from client.regions import FrameDetections
+    coordinator, parties, mpc = StubCoordinator(), StubPartyClient(), StubAnonymizingMpc()
+    with pytest.raises(cli.ClientInputError):
+        cli.upload_video(
+            _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+            StubReconstructor(), model=FakeYuNet(), processing_mode="anonymize",
+            anonymization_plan=prepare_anonymization(
+                (FrameDetections.success(0),), source_size=(1, 4), target_size=(1, 4), frame_count=1
+            ),
+        )
+    assert coordinator.calls == parties.calls == mpc.payloads == []
+
+
+def test_json_regions_are_explicit_complete_and_prepared_before_register(tmp_path: Path) -> None:
+    import json
+    path = tmp_path / "regions.json"
+    path.write_text(json.dumps({"width": 2, "height": 2, "frames": [
+        {"frame_index": 0, "status": "success", "regions": [
+            {"region_type": "face", "x": 1, "y": 0, "width": 1, "height": 1}
+        ]}
+    ]}), encoding="utf-8")
+    coordinator, parties, mpc = StubCoordinator(), StubPartyClient(), StubAnonymizingMpc()
+    assert cli.upload_video(
+        _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+        StubReconstructor(), model=FakeYuNet(), output_root=tmp_path / "output",
+        processing_mode="anonymize", regions_json=path,
+    ) == 0
+    assert mpc.plans == [_anonymization_plan()]
+    assert mpc.payloads == [b"\x00\x01\x02\x03"]
+
+
+@pytest.mark.parametrize("data", [
+    {"width": 2, "height": 2, "frames": []},
+    {"width": 2, "height": 2, "frames": [{"frame_index": 0, "status": "failed", "error": "detector fallido"}]},
+    {"width": 2, "height": 2, "frames": [{"frame_index": 0, "status": "success"}]},
+    {"width": 2, "height": 2, "frames": [{"frame_index": 1, "status": "success", "regions": []}]},
+    {"width": 4, "height": 1, "frames": [{"frame_index": 0, "status": "success", "regions": []}]},
+    {"width": 2, "height": 2, "frames": [{"frame_index": 0, "status": "unknown", "regions": []}]},
+])
+def test_failed_incomplete_or_ambiguous_json_never_starts_a_job(tmp_path: Path, data: dict) -> None:
+    import json
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    coordinator, parties, mpc = StubCoordinator(), StubPartyClient(), StubAnonymizingMpc()
+    with pytest.raises((ValueError, cli.DetectorExecutionError)):
+        cli.upload_video(
+            _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+            StubReconstructor(), model=FakeYuNet(), processing_mode="anonymize",
+            regions_json=path,
+        )
+    assert coordinator.calls == parties.calls == mpc.payloads == []
+
+
+def test_main_forwards_explicit_anonymization_mode_and_diagnostic_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    source = _video(tmp_path)
+    path = tmp_path / "regions.json"
+    path.write_text(json.dumps({"width": 2, "height": 2, "frames": [
+        {"frame_index": 0, "status": "success", "regions": [
+            {"region_type": "face", "x": 1, "y": 0, "width": 1, "height": 1}
+        ]}
+    ]}), encoding="utf-8")
+    mpc = StubAnonymizingMpc()
+    monkeypatch.setattr(cli, "CoordinatorClient", lambda url: StubCoordinator())
+    monkeypatch.setattr(cli, "PartyClient", StubPartyClient)
+    monkeypatch.setattr(cli, "VideoPreprocessor", lambda **options: StubPreprocessor())
+    monkeypatch.setattr(cli, "MpcExternalClient", lambda: mpc)
+    monkeypatch.setattr(cli, "VideoReconstructor", StubReconstructor)
+    monkeypatch.setattr(cli, "YuNet", lambda **options: FakeYuNet())
+    monkeypatch.setenv("DELTA_OUTPUT_DIR", str(tmp_path / "output"))
+    assert cli.main([
+        "upload", str(source), "--processing-mode", "anonymize", "--regions-json", str(path)
+    ]) == 0
+    assert mpc.payloads == [b"\x00\x01\x02\x03"]
+    assert mpc.plans == [_anonymization_plan()]
+
+
+def test_geometry_only_plan_cannot_bypass_complete_detection_results(tmp_path: Path) -> None:
+    from client.anonymization import AnonymizationPlan
+    coordinator, parties, mpc = StubCoordinator(), StubPartyClient(), StubAnonymizingMpc()
+    with pytest.raises(cli.ClientInputError, match="todos los fotogramas"):
+        cli.upload_video(
+            _video(tmp_path), coordinator, parties, StubPreprocessor(), mpc,
+            StubReconstructor(), model=FakeYuNet(), processing_mode="anonymize",
+            anonymization_plan=AnonymizationPlan(2, 2, 1, ()),
+        )
+    assert coordinator.calls == parties.calls == mpc.payloads == []

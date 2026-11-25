@@ -6,6 +6,8 @@ import os
 from fastapi import FastAPI
 
 from party_receiver.api.jobs import router as jobs_router
+from party_receiver.api.browser import router as browser_router
+from mpc.web_origins import add_web_cors
 from party_receiver.runtime import MpcRuntimeManager
 from party_receiver.services.job_service import PartyJobService
 
@@ -52,6 +54,8 @@ def create_app(runtime_manager: MpcRuntimeManager | None = None) -> FastAPI:
         coordinator_url=coordinator_url,
     )
     application.include_router(jobs_router)
+    application.include_router(browser_router)
+    add_web_cors(application)
 
     @application.get("/health", tags=["health"])
     async def health() -> dict[str, int | str]:

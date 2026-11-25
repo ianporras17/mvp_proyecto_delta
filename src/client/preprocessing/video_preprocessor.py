@@ -12,7 +12,6 @@ from client.preprocessing.yunet import YuNet
 from mpc.video_profile import (
     DEFAULT_MPC_FPS,
     MAX_CONFIGURED_FPS,
-    MAX_VIDEO_DURATION_SECONDS,
     MpcVideoProfile,
 )
 
@@ -108,22 +107,19 @@ class VideoPreprocessor:
     def __init__(
         self,
         *,
-        max_duration_seconds: float = MAX_VIDEO_DURATION_SECONDS,
+        max_duration_seconds: float | None = None,
         max_width: int | None = None,
         max_height: int | None = None,
         target_fps: float = DEFAULT_MPC_FPS,
     ) -> None:
-        if (
-            not math.isfinite(max_duration_seconds)
-            or not 0 < max_duration_seconds <= MAX_VIDEO_DURATION_SECONDS
+        if max_duration_seconds is not None and (
+            not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0
         ):
-            raise ValueError(
-                f"max_duration_seconds debe ser positivo y no superar {MAX_VIDEO_DURATION_SECONDS}"
-            )
+            raise ValueError("max_duration_seconds debe ser positivo y finito, o None")
         if not math.isfinite(target_fps) or not 0 < target_fps <= MAX_CONFIGURED_FPS:
             raise ValueError(f"target_fps debe ser positivo y no superar {MAX_CONFIGURED_FPS}")
         profile = MpcVideoProfile.from_environment(max_width, max_height)
-        self._max_duration = float(max_duration_seconds)
+        self._max_duration = max_duration_seconds
         self._max_width = profile.max_width
         self._max_height = profile.max_height
         self._target_fps = float(target_fps)
@@ -185,7 +181,7 @@ class VideoPreprocessor:
         if not math.isfinite(source_fps) or source_fps <= 0:
             capture.release()
             raise VideoPreprocessingError("El MP4 no declara un FPS válido")
-        if reported_frames > 0 and reported_frames / source_fps > self._max_duration + 1e-6:
+        if self._max_duration is not None and reported_frames > 0 and reported_frames / source_fps > self._max_duration + 1e-6:
             capture.release()
             raise VideoPreprocessingError(
                 f"El video excede la duración máxima de {self._max_duration:g} segundos"
@@ -206,7 +202,7 @@ class VideoPreprocessor:
                     break
                 timestamp = decoded_index / source_fps
                 decoded_index += 1
-                if timestamp >= self._max_duration:
+                if self._max_duration is not None and timestamp >= self._max_duration:
                     raise VideoPreprocessingError(
                         f"El video excede la duración máxima de {self._max_duration:g} segundos"
                     )
@@ -250,8 +246,7 @@ class VideoPreprocessor:
             raise VideoPreprocessingError("El MP4 no contiene frames decodificables")
 
         width, height = target_size
-        max_frames = math.ceil(self._max_duration * output_fps)
-        if len(frame_bytes) > max_frames:
+        if self._max_duration is not None and len(frame_bytes) > math.ceil(self._max_duration * output_fps):
             raise VideoPreprocessingError("El muestreo produjo más frames de los permitidos")
         metadata = VideoMetadata(
             frame_count=len(frame_bytes),

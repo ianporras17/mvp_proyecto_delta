@@ -8,10 +8,20 @@ import pytest
 
 from client.anonymization import AnonymizationPlan, prepare_anonymization
 from client.regions import DetectedRegion, FrameDetections, SensitiveRegion
+import mpc.external_io as external_io
 from mpc.external_io import (
-    ANONYMIZATION_ACK, CHUNK_SIZE, HANDSHAKE_TIMEOUT_SECONDS,
+    ANONYMIZATION_ACK, HANDSHAKE_TIMEOUT_SECONDS,
     MpcExternalClient, MpcExternalIOError, MpcSettings, _HandshakeSocket,
 )
+
+# Estas pruebas dimensionan videos de ~8 KB para cruzar fronteras de bloque: se
+# fija un bloque pequeño; la lógica de alineación no depende de su tamaño.
+CHUNK_SIZE = 4096
+
+
+@pytest.fixture(autouse=True)
+def small_chunks(monkeypatch):
+    monkeypatch.setattr(external_io, "CHUNK_SIZE", CHUNK_SIZE)
 
 
 def _prepared(width, height, frame_count, regions=()):

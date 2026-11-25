@@ -54,7 +54,7 @@ class MpcRuntimeManager:
 
     @property
     def log_path(self) -> Path:
-        configured = Path(os.getenv("MPC_LOG_DIR", "/tmp/mvp-proyecto-delta"))
+        configured = Path(os.getenv("MPC_LOG_DIR", "/tmp/proyecto-delta"))
         return configured / f"party-{self.party_id}.log"
 
     def start(self) -> None:

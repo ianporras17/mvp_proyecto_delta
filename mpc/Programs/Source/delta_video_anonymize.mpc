@@ -11,18 +11,24 @@ from Compiler.library import (
     accept_client_connection,
     do_while,
     else_,
-    for_range,
     if_,
     if_e,
     listen_for_clients,
     runtime_error_if,
 )
-from Compiler.types import Array, MemValue, cint, regint, sint
+from Compiler.types import MemValue, cint, regint, sint
 
 
 CLIENT_PORT_BASE = 14000
-CHUNK_SIZE = 4096
-MAX_PAYLOAD_SIZE = 200 * 640 * 480
+# Bloque configurable al compilar: ./compile.py -M -R 64 delta_video_anonymize 32768.
+# Debe coincidir con MPC_CHUNK_SIZE del cliente; si no, la comprobación de
+# bloques de abajo aborta el trabajo antes de recibir píxeles. Cada bloque cuesta
+# una ida y vuelta con las tres parties (~90 ms), por lo que 4096 era muy
+# pequeño: ver TareasDeInvestigacion/T34.md.
+CHUNK_SIZE = int(program.args[1]) if len(program.args) > 1 else 262144
+# No hay un presupuesto de duración. regint usa enteros con signo de 64 bits;
+# reservar margen al calcular ceil(longitud / CHUNK_SIZE), sin desbordamiento.
+MAX_PAYLOAD_SIZE = (1 << 63) - CHUNK_SIZE
 ANONYMIZATION_MAGIC = 0x444C5441  # DLTA; público, no un resultado secreto.
 ANONYMIZATION_VERSION = 1
 
@@ -58,24 +64,20 @@ def serve_jobs():
         )
 
     processed_chunks = MemValue(regint(0))
-    public_mask = Array(CHUNK_SIZE, regint)
 
     @do_while
     def process_chunk():
         @if_e(anonymize)
         def anonymize_chunk():
             mask = regint.read_from_socket(client_id, size=CHUNK_SIZE)
-            public_mask.assign_vector(mask)
 
-            # Bucle público en tiempo de ejecución: no expande 4096 circuitos
-            # ni utiliza comparaciones secretas para decidir las coordenadas.
-            @for_range(CHUNK_SIZE)
-            def validate_mask(index):
-                value = public_mask[index]
-                runtime_error_if(
-                    (value != 0) * (value != 1),
-                    'La mascara publica debe contener solamente 0 y 1',
-                )
+            # Validación vectorial pública (sin comparaciones secretas ni un
+            # bucle por elemento): cada comparación vale 0/1, así que la suma
+            # de los inválidos no desborda y es 0 solo si todo es 0 o 1.
+            runtime_error_if(
+                sint((mask < 0) + (mask > 1)).sum().reveal(),
+                'La mascara publica debe contener solamente 0 y 1',
+            )
 
             pixels = sint.receive_from_client(1, client_id, size=CHUNK_SIZE)[0]
             processed = pixels * (1 - cint(mask))

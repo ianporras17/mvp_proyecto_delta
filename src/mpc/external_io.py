@@ -6,18 +6,25 @@ import importlib.util
 import math
 import os
 from pathlib import Path
+import struct
 import sys
 from threading import Lock
 from types import ModuleType
 from typing import TYPE_CHECKING, Iterator
+from time import perf_counter
+
+import numpy as np
 
 if TYPE_CHECKING:
     from client.anonymization import AnonymizationPlan
 
 
-CHUNK_SIZE = 4096
+# Debe coincidir con el argumento de compilación del programa MPC (ver el .mpc).
+CHUNK_SIZE = int(os.getenv("MPC_CHUNK_SIZE", "262144"))
 ANONYMIZATION_ACK = (1145852993, 1)
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
+# DELTA_EXTERNALIO_VECTORIZED=0 fuerza el cliente oficial valor por valor.
+VECTORIZED_EXTERNALIO = os.getenv("DELTA_EXTERNALIO_VECTORIZED", "1") != "0"
 _IMPORT_LOCK = Lock()
 
 
@@ -36,7 +43,7 @@ class MpcSettings:
     @classmethod
     def from_environment(cls) -> "MpcSettings":
         project_root = Path(__file__).resolve().parents[2]
-        raw_hosts = os.getenv("MPC_PARTY_HOSTS", "localhost,localhost,localhost")
+        raw_hosts = os.getenv("MPC_PARTY_HOSTS", "127.0.0.1,127.0.0.1,127.0.0.1")
         hosts = tuple(item.strip() for item in raw_hosts.split(",") if item.strip())
         if len(hosts) != 3:
             raise ValueError("MPC_PARTY_HOSTS debe contener exactamente tres hosts")
@@ -48,7 +55,7 @@ class MpcSettings:
         certificate_dir = Path(
             os.getenv(
                 "MPC_CERT_DIR",
-                str(project_root / ".runtime" / "Player-Data"),
+                str(project_root / ".runtime" / "mvp" / "Player-Data"),
             )
         ).resolve()
         if not 1 <= port_base <= 65533:
@@ -62,6 +69,86 @@ class MpcSettings:
             mpspdz_root=mpspdz_root,
             certificate_dir=certificate_dir,
         )
+
+
+class _VectorizedChannel:
+    """Mismo protocolo que ExternalIO/client.py, con NumPy en lugar de un objeto
+    Python por valor.
+
+    Solo cubre Z2(64) semi-honesto (el programa usa ``program.active = False``):
+    para cada mensaje los bytes en la red son idénticos a los del cliente oficial,
+    así que no cambia nada en las parties. El modo activo, que envía tres valores
+    por triple, no se soporta y se rechaza por longitud inesperada. Si el cliente
+    no es el oficial real, ``create`` devuelve None y se usa el camino original.
+    """
+
+    def __init__(self, client) -> None:
+        self._sockets = list(client.sockets)
+
+    @classmethod
+    def create(cls, client) -> "_VectorizedChannel | None":
+        if not VECTORIZED_EXTERNALIO:
+            return None
+        sockets = getattr(client, "sockets", None)
+        domain = getattr(client, "domain", None)
+        clear_domain = getattr(client, "clear_domain", None)
+        if (
+            not sockets
+            or getattr(domain, "modulus", None) != 1 << 64
+            or getattr(clear_domain, "modulus", None) != 1 << 64
+            or not all(hasattr(connection, "recv_into") for connection in sockets)
+        ):
+            return None
+        return cls(client)
+
+    @staticmethod
+    def _receive_exactly(connection, count: int) -> bytearray:
+        buffer = bytearray(count)
+        view = memoryview(buffer)
+        received = 0
+        while received < count:
+            read = connection.recv_into(view[received:], count - received)
+            if not read:
+                raise OSError("Conexión cerrada durante ExternalIO")
+            received += read
+        return buffer
+
+    def _receive_sum(self, count: int) -> np.ndarray:
+        """Suma módulo 2^64 de las tres respuestas: el equivalente de receive_triples."""
+        total = np.zeros(count, dtype=np.uint64)
+        for connection in self._sockets:
+            (length,) = struct.unpack("<I", self._receive_exactly(connection, 4))
+            if length != count * 8:
+                raise MpcExternalIOError(
+                    f"Longitud inesperada de ExternalIO: {length} bytes para {count} valores"
+                )
+            total += np.frombuffer(self._receive_exactly(connection, length), dtype="<u8")
+        return total
+
+    def _send_all(self, data: bytes) -> None:
+        message = struct.pack("<i", len(data)) + data
+        for connection in self._sockets:
+            connection.sendall(message)
+
+    def send_public_mask(self, mask: bytes) -> None:
+        values = np.zeros(CHUNK_SIZE, dtype="<u8")
+        values[: len(mask)] = np.frombuffer(mask, dtype=np.uint8)
+        self._send_all(values.tobytes())
+
+    def exchange(self, payload: bytes, offset: int, length: int) -> bytes:
+        """Envía length píxeles privados y devuelve el bloque revelado al cliente."""
+        values = np.zeros(CHUNK_SIZE, dtype=np.uint64)
+        values[:length] = np.frombuffer(payload, dtype=np.uint8, count=length, offset=offset)
+        values += self._receive_sum(CHUNK_SIZE)
+        self._send_all(values.astype("<u8").tobytes())
+        revealed = self._receive_sum(CHUNK_SIZE).view(np.int64)
+        block = revealed[:length]
+        if (block < 0).any() or (block > 255).any():
+            bad = block[(block < 0) | (block > 255)][0]
+            raise MpcExternalIOError(f"MP-SPDZ devolvió un pixel fuera de uint8: {int(bad)}")
+        if revealed[length:].any():
+            raise MpcExternalIOError("MP-SPDZ devolvió padding no nulo")
+        return block.astype(np.uint8).tobytes()
 
 
 class MpcExternalClient:
@@ -86,21 +173,31 @@ class MpcExternalClient:
                 )
             client.send_public_inputs([len(payload), number_chunks])
             result = bytearray()
+            channel = _VectorizedChannel.create(client)
+            started = perf_counter()
             for offset in range(0, len(payload), CHUNK_SIZE):
-                chunk = list(payload[offset : offset + CHUNK_SIZE])
-                actual_length = len(chunk)
-                if actual_length < CHUNK_SIZE:
-                    chunk.extend([0] * (CHUNK_SIZE - actual_length))
-                client.send_private_inputs(chunk)
-                revealed = client.receive_outputs(CHUNK_SIZE)
-                if len(revealed) != CHUNK_SIZE:
-                    raise MpcExternalIOError("MP-SPDZ devolvió un bloque incompleto")
-                for value in revealed[:actual_length]:
-                    if not 0 <= value <= 255:
-                        raise MpcExternalIOError(
-                            f"MP-SPDZ devolvió un pixel fuera de uint8: {value}"
-                        )
-                    result.append(value)
+                if channel is not None:
+                    result += channel.exchange(
+                        payload, offset, min(CHUNK_SIZE, len(payload) - offset)
+                    )
+                else:
+                    chunk = list(payload[offset : offset + CHUNK_SIZE])
+                    actual_length = len(chunk)
+                    if actual_length < CHUNK_SIZE:
+                        chunk.extend([0] * (CHUNK_SIZE - actual_length))
+                    client.send_private_inputs(chunk)
+                    revealed = client.receive_outputs(CHUNK_SIZE)
+                    if len(revealed) != CHUNK_SIZE:
+                        raise MpcExternalIOError("MP-SPDZ devolvió un bloque incompleto")
+                    for value in revealed[:actual_length]:
+                        if not 0 <= value <= 255:
+                            raise MpcExternalIOError(
+                                f"MP-SPDZ devolvió un pixel fuera de uint8: {value}"
+                            )
+                        result.append(value)
+                if (offset // CHUNK_SIZE + 1) % 250 == 0 or offset + CHUNK_SIZE >= len(payload):
+                    print(f"[PROGRESO] ExternalIO: {offset // CHUNK_SIZE + 1}/{number_chunks} bloques; {perf_counter()-started:.1f} s", flush=True)
+            print(f"[TIEMPO] ExternalIO identidad: {perf_counter()-started:.3f} s", flush=True)
             return bytes(result)
         except MpcExternalIOError:
             raise
@@ -157,24 +254,34 @@ class MpcExternalClient:
                     raise MpcExternalIOError("La party no confirmó el programa de anonimización")
 
             result = bytearray()
+            channel = _VectorizedChannel.create(client)
+            started = perf_counter()
             for offset in range(0, len(payload), CHUNK_SIZE):
                 actual_length = min(CHUNK_SIZE, len(payload) - offset)
-                mask = list(plan.mask_chunk(offset, actual_length))
-                mask.extend([0] * (CHUNK_SIZE - actual_length))
-                client.send_public_inputs(mask)
-                # Nunca se ocultan los píxeles en el cliente: enviar los originales.
-                chunk = list(payload[offset : offset + actual_length])
-                chunk.extend([0] * (CHUNK_SIZE - actual_length))
-                client.send_private_inputs(chunk)
-                revealed = client.receive_outputs(CHUNK_SIZE)
-                if len(revealed) != CHUNK_SIZE:
-                    raise MpcExternalIOError("MP-SPDZ devolvió un bloque incompleto")
-                for value in revealed[:actual_length]:
-                    if not isinstance(value, int) or not 0 <= value <= 255:
-                        raise MpcExternalIOError("MP-SPDZ devolvió un píxel fuera de uint8")
-                    result.append(value)
-                if any(revealed[actual_length:]):
-                    raise MpcExternalIOError("MP-SPDZ devolvió padding no nulo")
+                if channel is not None:
+                    channel.send_public_mask(plan.mask_chunk(offset, actual_length))
+                    # Nunca se ocultan los píxeles en el cliente: enviar los originales.
+                    result += channel.exchange(payload, offset, actual_length)
+                else:
+                    mask = list(plan.mask_chunk(offset, actual_length))
+                    mask.extend([0] * (CHUNK_SIZE - actual_length))
+                    client.send_public_inputs(mask)
+                    # Nunca se ocultan los píxeles en el cliente: enviar los originales.
+                    chunk = list(payload[offset : offset + actual_length])
+                    chunk.extend([0] * (CHUNK_SIZE - actual_length))
+                    client.send_private_inputs(chunk)
+                    revealed = client.receive_outputs(CHUNK_SIZE)
+                    if len(revealed) != CHUNK_SIZE:
+                        raise MpcExternalIOError("MP-SPDZ devolvió un bloque incompleto")
+                    for value in revealed[:actual_length]:
+                        if not isinstance(value, int) or not 0 <= value <= 255:
+                            raise MpcExternalIOError("MP-SPDZ devolvió un píxel fuera de uint8")
+                        result.append(value)
+                    if any(revealed[actual_length:]):
+                        raise MpcExternalIOError("MP-SPDZ devolvió padding no nulo")
+                if (offset // CHUNK_SIZE + 1) % 250 == 0 or offset + CHUNK_SIZE >= len(payload):
+                    print(f"[PROGRESO] ExternalIO: {offset // CHUNK_SIZE + 1}/{number_chunks} bloques; {perf_counter()-started:.1f} s", flush=True)
+            print(f"[TIEMPO] ExternalIO anonimización: {perf_counter()-started:.3f} s", flush=True)
             result = bytes(result)
             # Validar, no producir un resultado anonimizado localmente.
             plan.validate_result(payload, result)

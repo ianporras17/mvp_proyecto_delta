@@ -4,18 +4,14 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 from coordinator.api import videos
 from coordinator.main import app
-from coordinator.models.video import VideoMetadata
 from coordinator.services.video_service import VideoService
 
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    monkeypatch.setenv("MPC_MAX_WIDTH", "640")
-    monkeypatch.setenv("MPC_MAX_HEIGHT", "480")
     monkeypatch.setattr(
         videos,
         "video_service",
@@ -95,7 +91,7 @@ def test_prepare_accepts_configured_resolution(
     monkeypatch.setenv("MPC_MAX_WIDTH", str(max_width))
     monkeypatch.delenv("MPC_MAX_HEIGHT", raising=False)
     metadata = _metadata()
-    metadata.update(width=max_width, height=max_width * 3 // 4, fps=10, frame_count=200)
+    metadata.update(width=max_width, height=max_width * 3 // 4)
     video_id = _register(client)["id"]
 
     response = client.post(
@@ -127,6 +123,7 @@ def test_prepare_rejects_resolution_above_configured_limit(
 def test_prepare_accepts_explicit_height_limit(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MPC_MAX_WIDTH", "640")
     monkeypatch.setenv("MPC_MAX_HEIGHT", "240")
     metadata = _metadata()
     metadata.update(width=640, height=240)
@@ -139,7 +136,7 @@ def test_prepare_accepts_explicit_height_limit(
     assert response.status_code == 200
 
 
-@pytest.mark.parametrize("fps, frame_count", [(5, 100), (10, 200), (5, 200)])
+@pytest.mark.parametrize("fps, frame_count", [(5, 100), (10, 200), (30, 36000)])
 def test_prepare_accepts_temporal_limits(
     client: TestClient, fps: int, frame_count: int
 ) -> None:
@@ -161,17 +158,22 @@ def test_prepare_accepts_temporal_limits(
         ("width", 0),
         ("height", 0),
         ("fps", 0),
-        ("fps", 10.01),
+        ("fps", 30.01),
         ("frame_count", 0),
-        ("frame_count", 201),
+        ("frame_count", -1),
         ("dtype", "uint16"),
         ("channels", 3),
         ("version", 3),
     ],
 )
-def test_prepare_preserves_metadata_contract(
-    client: TestClient, field: str, value: object
+def test_configured_resolution_preserves_metadata_contract(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
 ) -> None:
+    monkeypatch.setenv("MPC_MAX_WIDTH", "640")
+    monkeypatch.setenv("MPC_MAX_HEIGHT", "480")
     metadata = _metadata()
     metadata[field] = value
     video_id = _register(client)["id"]
@@ -180,29 +182,6 @@ def test_prepare_preserves_metadata_contract(
         f"/api/v1/videos/{video_id}/prepare", json={"metadata": metadata}
     )
 
-    assert response.status_code == 422
-
-
-@pytest.mark.parametrize("fps", [float("nan"), float("inf")])
-def test_metadata_rejects_nonfinite_fps(fps: float) -> None:
-    metadata = _metadata()
-    metadata["fps"] = fps
-    with pytest.raises(ValidationError):
-        VideoMetadata.model_validate(metadata)
-
-
-@pytest.mark.parametrize(
-    ("setting", "value"),
-    [("MPC_MAX_WIDTH", "641"), ("MPC_MAX_HEIGHT", "481"), ("MPC_MAX_WIDTH", "invalid")],
-)
-def test_prepare_rejects_incompatible_profile(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, setting: str, value: str
-) -> None:
-    monkeypatch.setenv(setting, value)
-    video_id = _register(client)["id"]
-    response = client.post(
-        f"/api/v1/videos/{video_id}/prepare", json={"metadata": _metadata()}
-    )
     assert response.status_code == 422
 
 

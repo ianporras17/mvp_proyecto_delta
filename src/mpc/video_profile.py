@@ -1,16 +1,15 @@
-"""Límites de resolución y FPS compartidos por el cliente y las APIs del MVP."""
+"""Límites de video compartidos por el cliente y las APIs de control."""
 
 from dataclasses import dataclass
 import os
 
 
-DEFAULT_MPC_WIDTH = 640
-MAX_CONFIGURED_WIDTH = 640
-MAX_CONFIGURED_HEIGHT = 480
-DEFAULT_MPC_FPS = 10.0
-MAX_CONFIGURED_FPS = 10
-MAX_VIDEO_DURATION_SECONDS = 20
-MAX_VIDEO_FRAMES = MAX_VIDEO_DURATION_SECONDS * MAX_CONFIGURED_FPS
+# Cotas de entrada, no una promesa de tiempo real o memoria ilimitada.
+DEFAULT_MPC_WIDTH = 1920
+MAX_CONFIGURED_WIDTH = 1920
+MAX_CONFIGURED_HEIGHT = 1080
+DEFAULT_MPC_FPS = 30.0
+MAX_CONFIGURED_FPS = 30
 
 
 @dataclass(frozen=True)
@@ -30,16 +29,19 @@ class MpcVideoProfile:
 
     @classmethod
     def from_environment(
-        cls, max_width: int | None = None, max_height: int | None = None,
+        cls,
+        max_width: int | None = None,
+        max_height: int | None = None,
     ) -> "MpcVideoProfile":
-        """Argumentos sobre entorno; el alto predeterminado es 3/4 del ancho.
+        """Los argumentos tienen prioridad; la caja nueva por defecto es 1080p.
 
-        Define una caja máxima, no la proporción del video. El preprocesador
-        conserva la proporción y no amplía. Los servicios usan el mismo perfil.
-        Aceptar el límite no demuestra rendimiento de 20 s a 640x480.
+        Este par define una caja máxima, no la proporción del video. Todos los
+        servicios deben configurar los mismos máximos antes de aceptar un job.
+        Los perfiles menores conservan el alto 4:3 anterior hasta 1080.
+        Admitir una resolución no demuestra su rendimiento en videos largos.
         """
         width = cls._dimension("MPC_MAX_WIDTH", max_width, DEFAULT_MPC_WIDTH)
-        height = cls._dimension("MPC_MAX_HEIGHT", max_height, width * 3 // 4)
+        height = cls._dimension("MPC_MAX_HEIGHT", max_height, min(1080, width * 3 // 4))
         return cls(width, height)
 
     @staticmethod

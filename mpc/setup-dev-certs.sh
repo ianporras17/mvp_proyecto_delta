@@ -30,4 +30,13 @@ if [[ "${complete}" -eq 0 ]]; then
 fi
 
 c_rehash "${cert_dir}"
+# Each deployed party sees its own private key, the transport-client key,
+# and public peer certificates. It cannot read other parties' private keys.
+for party in 0 1 2; do
+    isolated="${runtime_root}/party-${party}/Player-Data"
+    mkdir -p "${isolated}"
+    cp "${cert_dir}"/*.pem "${isolated}/"
+    cp "${cert_dir}/P${party}.key" "${cert_dir}/C0.key" "${isolated}/"
+    c_rehash "${isolated}"
+done
 touch "${runtime_root}/certificates.ready"

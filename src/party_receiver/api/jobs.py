@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from mpc.video_profile import MAX_CONFIGURED_FPS, MAX_VIDEO_FRAMES, MpcVideoProfile
+from mpc.video_profile import MAX_CONFIGURED_FPS, MpcVideoProfile
 
 from party_receiver.runtime import MpcRuntimeError
 from party_receiver.services.job_service import (
@@ -24,7 +24,7 @@ class JobMetadata(BaseModel):
     width: int = Field(ge=1)
     height: int = Field(ge=1)
     fps: float = Field(gt=0, le=MAX_CONFIGURED_FPS)
-    frame_count: int = Field(ge=1, le=MAX_VIDEO_FRAMES)
+    frame_count: int = Field(ge=1)
     dtype: Literal["uint8"]
     channels: Literal[1]
     version: Literal[2]

@@ -11,6 +11,7 @@ import cv2 as cv
 
 from client.preprocessing.yunet import DEFAULT_YUNET_MODEL, YuNet, YuNetInitializationError
 from client.detection import DEFAULT_PLATE_CONFIDENCE_THRESHOLD, LPDYuNet, PlateDetectionError
+from client.detection.yolo_counter import VideoCounter, CountingError
 
 from client.networking import (
     CoordinatorClient,
@@ -58,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preprocesa un MP4, ejecuta MPC y reconstruye el resultado.",
     )
     upload.add_argument("video", type=Path, help="Ruta local al archivo .mp4")
+    upload.add_argument("--count-objects", action="store_true",
+                        help="Cuenta trayectorias de personas y carros con YOLOX en el cliente.")
     upload.add_argument(
         "--processing-mode", choices=("identity", "anonymize"), default="identity",
         help="identity conserva el MVP; anonymize aplica cajas negras MPC a regiones.",
@@ -178,6 +181,7 @@ def upload_video(
     detect_plates: bool = False,
     detect_faces: bool = False,
     plate_confidence_threshold: float = DEFAULT_PLATE_CONFIDENCE_THRESHOLD,
+    count_objects: bool = False,
 ) -> int:
     path = _validated_video_path(video_path)
     if processing_mode not in ("identity", "anonymize"):
@@ -196,11 +200,12 @@ def upload_video(
     print("Proyecto Delta - MPC MVP")
     print(f"\nVideo: {path.name}")
 
-    if detect_plates:
-        detector = LPDYuNet(confidence_threshold=plate_confidence_threshold)
-        frame_detections: list[FrameDetections] = []
+    counter = VideoCounter() if count_objects else None
+    detector = LPDYuNet(confidence_threshold=plate_confidence_threshold) if detect_plates else None
+    frame_detections: list[FrameDetections] = []
 
-        def detect_sample(original_bgr, frame_index: int) -> None:
+    def detect_sample(original_bgr, frame_index: int) -> None:
+        if detector is not None:
             frame = detector.detect_frame(original_bgr, frame_index)
             if not isinstance(frame, FrameDetections) or frame.frame_index != frame_index:
                 raise ClientInputError("El detector devolvió un índice de fotograma incompatible")
@@ -209,8 +214,16 @@ def upload_video(
                     f"Detector de placas fallido en frame_index={frame_index}: {frame.error}"
                 )
             frame_detections.append(frame)
+        if counter is not None:
+            counter.observe(original_bgr, frame_index)
+        if frame_index % 150 == 0:
+            print(f"[PROGRESO] Detección: {frame_index + 1} cuadros analizados", flush=True)
 
+    if detect_plates or count_objects:
         processed = preprocessor.process(path, model, on_sample=detect_sample)
+    else:
+        processed = preprocessor.process(path, model)
+    if detect_plates:
         if processed.source_size is None:
             raise ClientInputError("El preprocesador no informó las dimensiones originales")
         anonymization_plan = prepare_anonymization(
@@ -220,8 +233,9 @@ def upload_video(
         )
         print(f"[OK] Placas: {len(anonymization_plan.regions)} regiones preparadas; umbral {plate_confidence_threshold:g}")
         print("[AVISO] Solo se ocultan las regiones detectadas; el modelo puede omitir placas visibles.")
-    else:
-        processed = preprocessor.process(path, model)
+    if counter is not None:
+        counts = counter.summary()
+        print(f"[OK] YOLO: {counts['people']} personas, {counts['cars']} carros (trayectorias por video)")
     if detect_faces:
         target_size = (processed.metadata.width, processed.metadata.height)
         detections_by_frame: list[list[DetectedRegion]] = [
@@ -284,6 +298,10 @@ def upload_video(
     print(f"[OK] Job registrado: {registration.id}")
 
     try:
+        if counter is not None:
+            report = Path(output_root) / registration.id / "counts.json"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(json.dumps(counter.summary(), ensure_ascii=False, indent=2), encoding="utf-8")
         coordinator.prepare(registration.id, metadata)
         for endpoint in registration.parties:
             party_client.prepare_job(
@@ -396,6 +414,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detect_plates=args.detect_plates,
             detect_faces=args.detect_faces,
             plate_confidence_threshold=args.plate_confidence_threshold,
+            count_objects=args.count_objects,
             model=YuNet(modelPath=DEFAULT_YUNET_MODEL,
                   inputSize=[320, 320],
                   confThreshold=args.conf_threshold,
@@ -416,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         DetectorExecutionError,
         PlateDetectionError,
         YuNetInitializationError,
+        CountingError,
         ValueError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -1,2 +1,2 @@
-"""Node Agent reutilizable para las tres computing parties del MVP."""
+"""Receptor HTTP reutilizable para las tres mock parties de Proyecto Delta."""
 

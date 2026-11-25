@@ -1,2 +1,2 @@
-"""Endpoints HTTP de control del Node Agent."""
+"""Endpoints HTTP del receptor de shares."""
 

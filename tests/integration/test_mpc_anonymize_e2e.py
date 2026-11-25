@@ -20,6 +20,7 @@ from client.preprocessing import VideoPreprocessor, VideoReconstructor
 from client.preprocessing.yunet import YuNet
 from client.regions import DetectedRegion, FrameDetections, RegionType
 from mpc import MpcExternalClient
+import mpc.external_io as external_io
 from mpc.external_io import CHUNK_SIZE
 
 
@@ -151,6 +152,20 @@ def test_three_real_parties_anonymize_synthetic_t024_regions(
             public_messages.append(tuple(values))
             return super().send_public_inputs(values)
 
+    class RecordingChannel(external_io._VectorizedChannel):
+        """Observa lo enviado por bloque; los bytes de red los produce el canal real."""
+
+        def send_public_mask(self, mask):
+            public_messages.append(tuple(mask) + (0,) * (CHUNK_SIZE - len(mask)))
+            return super().send_public_mask(mask)
+
+        def exchange(self, payload, offset, length):
+            private_chunks.append(
+                tuple(payload[offset:offset + length]) + (0,) * (CHUNK_SIZE - length)
+            )
+            return super().exchange(payload, offset, length)
+
+    monkeypatch.setattr(external_io, "_VectorizedChannel", RecordingChannel)
     monkeypatch.setattr(
         mpc, "_load_official_client", lambda: SimpleNamespace(Client=RecordingOfficialClient)
     )

@@ -6,13 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "mvp-proyecto-delta"
 version = "0.2.0"
 description = "MVP MPC de video con tres parties MP-SPDZ y ExternalIO"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110,<1.0",
     "uvicorn>=0.27,<1.0",
+    "websockets>=13,<16",
+    "python-multipart>=0.0.20,<1.0",
     "httpx>=0.27,<1.0",
-    "pydantic>=2,<3",
     "numpy>=1.26,<3.0",
     "opencv-python-headless>=4.9,<5.0",
     "gmpy2>=2.1,<3.0",
@@ -25,7 +25,7 @@ delta = "client.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"client.detection" = ["models/*.onnx", "models/LICENSE", "models/README.md"]
+"client.detection" = ["models/*.onnx", "models/LICENSE"]
 "client.preprocessing" = ["*.onnx", "LICENSE"]
 
 [tool.pytest.ini_options]

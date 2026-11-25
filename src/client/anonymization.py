@@ -10,6 +10,8 @@ from functools import cached_property
 from numbers import Integral
 from types import MappingProxyType
 
+import numpy as np
+
 from client.regions import FrameDetections, SensitiveRegion, prepare_regions
 
 
@@ -97,7 +99,7 @@ class AnonymizationPlan:
                         mask[begin - offset:stop - offset] = b"\x01" * (stop - begin)
         return bytes(mask)
 
-    def validate_result(self, original: bytes, result: bytes, *, chunk_size: int = 4096) -> None:
+    def validate_result(self, original: bytes, result: bytes, *, chunk_size: int = 1 << 20) -> None:
         """Verify unchanged outside pixels and zero inside; never modify inputs."""
         chunk_size = _integer(chunk_size, "chunk_size", minimum=1)
         if not isinstance(original, bytes) or not isinstance(result, bytes):
@@ -105,11 +107,15 @@ class AnonymizationPlan:
         if len(original) != self.payload_size or len(result) != self.payload_size:
             raise ValueError("La cantidad de pixeles no coincide con el plan")
         for offset in range(0, self.payload_size, chunk_size):
-            mask = self.mask_chunk(offset, min(chunk_size, self.payload_size - offset))
-            for position, hidden in enumerate(mask, start=offset):
-                expected = 0 if hidden else original[position]
-                if result[position] != expected:
-                    raise ValueError(f"Resultado MPC incorrecto en el pixel {position}")
+            length = min(chunk_size, self.payload_size - offset)
+            hidden = np.frombuffer(self.mask_chunk(offset, length), dtype=np.uint8) != 0
+            expected = np.frombuffer(original, dtype=np.uint8, count=length, offset=offset).copy()
+            expected[hidden] = 0
+            mismatch = np.flatnonzero(
+                np.frombuffer(result, dtype=np.uint8, count=length, offset=offset) != expected
+            )
+            if mismatch.size:
+                raise ValueError(f"Resultado MPC incorrecto en el pixel {offset + int(mismatch[0])}")
 
 
 def prepare_anonymization(

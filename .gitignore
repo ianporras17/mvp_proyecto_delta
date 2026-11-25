@@ -7,6 +7,19 @@ __pycache__/
 .env
 .runtime/
 output/
+results/
 
 # Los videos permanecen fuera del control de versiones.
 *.mp4
+!frontend/e2e/fixtures/sample.mp4
+
+# Shares producidos en ejecución; las carpetas se conservan con .gitkeep.
+data/parties/*/*.share
+data/parties/*/*.tmp
+# Reproducible browser assets (same source weights and local WASM runtimes).
+frontend/public/models/
+frontend/public/vendor/
+data/results/
+
+# PocketBase local; las migraciones sí se versionan.
+pb_data/

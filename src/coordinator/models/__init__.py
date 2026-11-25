@@ -1,6 +1,7 @@
 """Modelos públicos del Coordinator."""
 
 from .video import (
+    ConfirmationRequest,
     FailureRequest,
     PartyEndpoint,
     PartyReadyRequest,
@@ -14,6 +15,7 @@ from .video import (
 )
 
 __all__ = [
+    "ConfirmationRequest",
     "FailureRequest",
     "PartyEndpoint",
     "PartyReadyRequest",

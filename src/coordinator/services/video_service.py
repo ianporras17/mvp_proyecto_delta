@@ -185,6 +185,11 @@ class VideoService:
                 self._active_job_id = None
             return self._state_response(job)
 
+    def confirm_share(self, video_id: UUID, party_id: int) -> VideoStateResponse:
+        """Compatibilidad temporal con callbacks T09 durante la migración."""
+
+        return self.mark_party_ready(video_id, party_id)
+
     def _find_job(self, video_id: UUID) -> _VideoJob:
         try:
             return self._jobs[video_id]

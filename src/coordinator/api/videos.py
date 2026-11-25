@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from coordinator.models.video import (
+    ConfirmationRequest,
     FailureRequest,
     PartyReadyRequest,
     VideoPrepareRequest,
@@ -104,4 +105,17 @@ async def cleanup_video(video_id: UUID) -> VideoStateResponse:
     try:
         return video_service.cleanup(video_id)
     except (VideoNotFoundError, InvalidTransitionError) as exc:
+        raise _translate_control_error(exc) from exc
+
+
+@router.post("/{video_id}/confirmations", response_model=VideoStateResponse, deprecated=True)
+async def legacy_confirmation(
+    video_id: UUID,
+    payload: ConfirmationRequest,
+) -> VideoStateResponse:
+    """Alias temporal: RECEIVED significa que el Node Agent está READY."""
+
+    try:
+        return video_service.confirm_share(video_id, payload.party_id)
+    except (VideoNotFoundError, InvalidTransitionError, ValueError) as exc:
         raise _translate_control_error(exc) from exc

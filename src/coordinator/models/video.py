@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from mpc.video_profile import MAX_CONFIGURED_FPS, MAX_VIDEO_FRAMES, MpcVideoProfile
+from mpc.video_profile import MAX_CONFIGURED_FPS, MpcVideoProfile
 
 
 class VideoStatus(str, Enum):
@@ -43,7 +43,7 @@ class VideoMetadata(BaseModel):
     width: int = Field(ge=1)
     height: int = Field(ge=1)
     fps: float = Field(gt=0, le=MAX_CONFIGURED_FPS)
-    frame_count: int = Field(ge=1, le=MAX_VIDEO_FRAMES)
+    frame_count: int = Field(ge=1)
     dtype: Literal["uint8"] = "uint8"
     channels: Literal[1] = 1
     version: Literal[2] = 2
@@ -93,6 +93,13 @@ class PartyReadyRequest(BaseModel):
     """Callback emitido por un Node Agent listo."""
 
     status: Literal["READY"] = "READY"
+
+
+class ConfirmationRequest(BaseModel):
+    """Alias transitorio del callback T09; no transporta shares."""
+
+    party_id: int = Field(ge=0, le=2, strict=True)
+    status: Literal["RECEIVED"]
 
 
 class FailureRequest(BaseModel):
